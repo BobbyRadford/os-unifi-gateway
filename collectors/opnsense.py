@@ -23,6 +23,9 @@ FORBIDDEN_BACKOFF = 600
 # How long a client's DNS name holds against the other PTR records of its address
 RDNS_HOLD = 900
 
+# How long after a 5-minute Insight bucket closes before its traffic is counted
+FLOW_SETTLE = 600
+
 
 def parse_uptime(text):
     """Parse OPNsense's uptime string: '3 days, 04:05:06' or '04:05:06'."""
@@ -680,11 +683,16 @@ class OPNsenseCollector:
         The FlowSourceAddrTotals aggregate counts each flow twice: once under
         its source on the ingress interface (direction 'in') and once under
         its destination on the egress interface (direction 'out'). On the LAN
-        side those are a client's upload and download. Only complete 5-minute
-        buckets are queried, so nothing is counted twice.
+        side those are a client's upload and download. Each 5-minute bucket is
+        queried once, so nothing is counted twice.
+
+        NetFlow exports a long connection only every activeTimeout seconds,
+        and Insight then spreads its bytes back over the buckets it spanned.
+        A bucket is read FLOW_SETTLE seconds after it closes so those late
+        bytes are in it, which needs activeTimeout set well below that.
         """
         resolution = 300
-        until = int(time.time()) // resolution * resolution
+        until = (int(time.time()) - FLOW_SETTLE) // resolution * resolution
         since = self._flow_until or until - resolution
         if until <= since:
             return

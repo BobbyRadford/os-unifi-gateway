@@ -628,22 +628,23 @@ class TestClients:
             return [{'src_addr': '192.168.48.2', 'total': 1000}]
         fake_api.responses['/api/diagnostics/networkinsight/top/'] = top
 
-        with patch('collectors.opnsense.time.time', return_value=3000.0):
+        with patch('collectors.opnsense.time.time', return_value=3600.0):
             dc = make(gateway_config, fake_api)
         host = [h for h in dc.data['host_table'] if h['ip'] == '192.168.48.2'][0]
         assert (host['tx_bytes'], host['rx_bytes']) == (100, 1000)
         flow_calls = [c for c in fake_api.calls if 'networkinsight' in c]
         assert '/FlowSourceAddrTotals/2700/3000/' in flow_calls[0]
 
+        # bucket 2700-3000 is read only once it has settled for 10 minutes
         # same 5-minute bucket: nothing new is queried or added
         dc.updated['host_table'] = 0
-        with patch('collectors.opnsense.time.time', return_value=3200.0):
+        with patch('collectors.opnsense.time.time', return_value=3800.0):
             dc.update()
         assert len([c for c in fake_api.calls if 'networkinsight' in c]) == 2
 
         # next bucket adds on top
         dc.updated['host_table'] = 0
-        with patch('collectors.opnsense.time.time', return_value=3301.0):
+        with patch('collectors.opnsense.time.time', return_value=3901.0):
             dc.update()
         host = [h for h in dc.data['host_table'] if h['ip'] == '192.168.48.2'][0]
         assert (host['tx_bytes'], host['rx_bytes']) == (200, 2000)

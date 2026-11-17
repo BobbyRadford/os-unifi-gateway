@@ -62,7 +62,7 @@ Earlier versions appeared as a UniFi Gateway Lite, on which the controller won't
 | WAN speed test | measured by the daemon against the nearest fast [speedtest.net](https://www.speedtest.net) server |
 | Client ping test | the firewall pings the client |
 
-Per-client traffic needs **Reporting > NetFlow** capturing the LAN interface.
+Per-client traffic needs **Reporting > NetFlow** capturing the LAN interface, with local capture on. Set its active timeout to 120 seconds. NetFlow reports a long connection only once per active timeout, and the daemon counts each 5-minute bucket 10 minutes after it closes, so the default of 1800 seconds would leave long downloads and streams out. Traffic shows up in UniFi about 10 to 15 minutes after it happens.
 
 The speed test (**ISP Speed Test** on the dashboard, or the controller's schedule) needs nothing extra installed, and shows its progress live. It runs where the daemon runs: on the plugin it measures the firewall's WAN link, but in Docker it measures the Docker host's connection, not the router's. It picks the lowest-latency of the nearest speedtest.net servers, then measures each direction for at least 10 seconds over 8 connections, so results should match speedtest.net. The last result is kept in `speedtest.json` next to the config file.
 
