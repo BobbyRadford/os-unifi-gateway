@@ -71,7 +71,8 @@ for _ in $(seq 30); do
 done
 
 pct exec "$CTID" -- bash -euc "
-export DEBIAN_FRONTEND=noninteractive
+# the template has no locales, so don't pass on the caller's
+export DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8
 apt-get update -qq
 apt-get install -y -qq git python3-requests python3-cryptography python3-dnspython >/dev/null
 useradd --system --home-dir $STATE --shell /usr/sbin/nologin unifi-gw
