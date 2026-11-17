@@ -15,4 +15,6 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .venv/
-conf/system_cfg*.json
+conf/system_cfg.json
+conf/system_cfg-history/
+conf/daemon.log
