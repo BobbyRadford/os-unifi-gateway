@@ -29,6 +29,11 @@ def _rows(response):
 
 def create_api_source(config):
     """Build an API source from [opnsense] config, after env overrides."""
+    return APISource(create_api(config))
+
+
+def create_api(config):
+    """Build an OPNsense REST client from [opnsense] config."""
     host = config.get('opnsense', 'host', fallback='').strip()
     if not host:
         raise ValueError('No router address set: put host = <router IP> under '
@@ -43,11 +48,11 @@ def create_api_source(config):
         raise ValueError('No OPNsense API credentials: set api_key/api_secret '
                          'or api_key_file under [opnsense]')
 
-    return APISource(OPNsenseAPI(
+    return OPNsenseAPI(
         host, key, secret,
         verify_ssl=config.getboolean('opnsense', 'verify_ssl', fallback=True),
         timeout=config.getint('opnsense', 'timeout', fallback=15),
-    ))
+    )
 
 
 class APISource(Source):

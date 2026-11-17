@@ -9,6 +9,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 import time
 
 import requests
@@ -18,6 +19,7 @@ from devices import Device
 from isp import IspInfo
 from pingtest import EVENT as PINGTEST_EVENT, PingTests
 from provision import store_system_cfg
+from reconcile import Reconciler, intent_from_system_cfg
 from speedtest import SpeedTest
 from unifi_protocol import (
     LIVE_INFORM_INTERVAL, create_broadcast_message, create_event_inform, create_inform,
@@ -71,6 +73,10 @@ DEFAULTS = {
         'use_aes_gcm': 'False',
     },
     'provisioned': {},
+    # off, plan (log what would change) or apply; see reconcile.py
+    'apply': {
+        'mode': 'off',
+    },
 }
 
 # Environment variables that override settings for this process only; they
@@ -86,6 +92,7 @@ ENV_OVERRIDES = {
     'UNIFI_GW_SOURCE': ('opnsense', 'source'),
     'UNIFI_GW_FIRMWARE': ('gateway', 'firmware'),
     'UNIFI_GW_HOSTNAME': ('gateway', 'hostname'),
+    'UNIFI_GW_APPLY': ('apply', 'mode'),
 }
 
 
@@ -174,6 +181,9 @@ class UnifiGateway:
         self._unhandled = {}
         self._adopt_logged = False
         self._rejections = 0
+        self.reconciler = None
+        self._reconcile_lock = threading.Lock()
+        self._pending_cfg = None
 
     def _set_runtime(self, section, option, value):
         key = (section, option)
@@ -195,6 +205,41 @@ class UnifiGateway:
             self.datacollector.data['ip'].get(self.device.wan_port, {}).get('address', 'no IPv4'),
         )
         self._unhandled = self._load_unhandled()
+        self._init_reconciler()
+
+    def _init_reconciler(self):
+        """Apply the controller's config to OPNsense when [apply] mode asks
+        for it, starting with the last config it pushed."""
+        mode = self.config.get('apply', 'mode', fallback='off').strip().lower()
+        if mode == 'off':
+            return
+        if self.config.get('opnsense', 'source', fallback='api').strip().lower() != 'api':
+            logger.warning('[apply] needs the OPNsense API source; not applying')
+            return
+        from collectors.api_source import create_api
+        self.reconciler = Reconciler(create_api(self.config), mode)
+        logger.info('Applying the controller config to OPNsense (mode: %s)', mode)
+        try:
+            with open(os.path.join(os.path.dirname(CONFIG_FILE) or '.', 'system_cfg.json')) as f:
+                self._reconcile_async(json.load(f))
+        except (OSError, ValueError):
+            pass
+
+    def _reconcile_async(self, cfg):
+        """Reconcile in the background so a slow router never delays an
+        inform. Pushes that arrive while one runs collapse into the latest."""
+        self._pending_cfg = cfg
+        threading.Thread(target=self._reconcile, daemon=True).start()
+
+    def _reconcile(self):
+        with self._reconcile_lock:
+            cfg, self._pending_cfg = self._pending_cfg, None
+            if cfg is None:
+                return
+            try:
+                self.reconciler.run(intent_from_system_cfg(cfg))
+            except Exception:
+                logger.exception('Applying the controller config to OPNsense failed')
 
     def _wait_for_collector(self):
         """Retry until the router API answers; config errors are fatal."""
@@ -620,7 +665,9 @@ class UnifiGateway:
 
     def _on_system_cfg(self, value):
         """Keep the controller's full configuration for this gateway."""
-        store_system_cfg(os.path.dirname(CONFIG_FILE) or '.', value)
+        cfg = store_system_cfg(os.path.dirname(CONFIG_FILE) or '.', value)
+        if cfg and self.reconciler:
+            self._reconcile_async(cfg)
 
     def _parse_mgmt_cfg(self, data):
         HANDLED_MGMT_KEYS = {

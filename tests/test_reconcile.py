@@ -1,0 +1,174 @@
+import copy
+
+import pytest
+
+from reconcile import OWNER_TAG, Intent, DhcpScope, PortForward, Reconciler, intent_from_system_cfg
+
+SUBNET_UUID = 'sub-1'
+
+# Shapes captured from a Network 10.6.109 controller
+SYSTEM_CFG = {'udapi': {
+    'services': {'dhcpServers': [{
+        'enabled': True, 'ipVersion': 'v4', 'gatewayAddress': '10.0.0.1', 'ipv4Netmask': 24,
+        'leaseTime': 4000, 'rangeStart': '10.0.0.100', 'rangeStop': '10.0.0.254',
+        'interfaces': [{'id': 'br0'}],
+        'staticLeases': [{'addresses': ['10.0.0.112'], 'id': '00:00:5E:00:53:70'}],
+    }]},
+    'firewall/nat': [
+        {'chain': 'POSTROUTING', 'enabled': True, 'id': 1, 'target': 'MASQUERADE',
+         'outInterface': {'id': 'eth0'}, 'source': {'sets': ['!ADDRv4_eth0']}},
+        {'chain': 'PREROUTING', 'description': 'PortForward DNAT [plex]',
+         'destination': {'port': '32400', 'sets': ['ADDRv4_eth0']}, 'enabled': True, 'id': 2,
+         'protocol': 'tcp', 'source': {}, 'target': 'DNAT',
+         'translation': {'address': '10.0.0.50', 'port': '32400'}},
+        {'chain': 'POSTROUTING', 'description': 'PortForward MASQUERADE [plex]',
+         'destination': {'address': '10.0.0.50', 'port': '32400'}, 'enabled': True, 'id': 3,
+         'protocol': 'tcp', 'source': {'sets': ['NETv4_br0']}, 'target': 'MASQUERADE'},
+    ],
+}}
+
+
+class FakeOPNsense:
+    """Answers the GETs the reconciler makes and records its POSTs."""
+
+    def __init__(self):
+        self.subnets = [{'uuid': SUBNET_UUID, 'subnet': '10.0.0.0/24',
+                         'pools': '10.0.0.100 - 10.0.0.254', 'valid_lifetime': ''}]
+        self.reservations = []
+        self.nat = []
+        self.lease = '4000'
+        self.posts = []
+
+    def get(self, path):
+        return {
+            '/api/kea/dhcpv4/search_subnet': {'rows': self.subnets},
+            '/api/kea/dhcpv4/search_reservation': {'rows': self.reservations},
+            '/api/kea/dhcpv4/get': {'dhcpv4': {'general': {'valid_lifetime': self.lease}}},
+            '/api/firewall/d_nat/search_rule': {'rows': self.nat},
+        }[path]
+
+    def post(self, path, body=None):
+        self.posts.append((path, copy.deepcopy(body)))
+        return {'result': 'saved'}
+
+    def paths(self):
+        return [path for path, _ in self.posts]
+
+
+def reservation(mac, ip, description='', uuid=None):
+    return {'uuid': uuid or 'r-' + ip, 'subnet': SUBNET_UUID, 'hw_address': mac,
+            'ip_address': ip, 'description': description}
+
+
+def test_intent_from_captured_system_cfg():
+    intent = intent_from_system_cfg(SYSTEM_CFG)
+    assert intent.dhcp == [DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000,
+                                     {'00:00:5e:00:53:70': '10.0.0.112'})]
+    # only the DNAT half of a port forward matters; its masquerade is UniFi's
+    assert intent.port_forwards == [PortForward('plex', 'tcp', '32400', '10.0.0.50', '32400')]
+
+
+def test_plan_mode_never_posts():
+    api = FakeOPNsense()
+    changes = Reconciler(api, 'plan').run(intent_from_system_cfg(SYSTEM_CFG))
+    assert len(changes) == 2
+    assert api.posts == []
+
+
+def test_off_mode_does_nothing():
+    api = FakeOPNsense()
+    assert Reconciler(api, 'off').run(intent_from_system_cfg(SYSTEM_CFG)) == []
+
+
+def test_unknown_mode_is_rejected():
+    with pytest.raises(ValueError):
+        Reconciler(FakeOPNsense(), 'yolo')
+
+
+def test_apply_adds_reservation_and_forward_then_reloads():
+    api = FakeOPNsense()
+    Reconciler(api, 'apply').run(intent_from_system_cfg(SYSTEM_CFG))
+    assert api.paths() == [
+        '/api/kea/dhcpv4/add_reservation',
+        '/api/firewall/d_nat/add_rule',
+        '/api/kea/service/reconfigure',
+        '/api/firewall/d_nat/apply',
+    ]
+    added = api.posts[0][1]['reservation']
+    assert added['hw_address'] == '00:00:5e:00:53:70'
+    assert added['description'].startswith(OWNER_TAG)
+    rule = api.posts[1][1]['rule']
+    assert rule['destination'] == {'network': 'wanip', 'port': '32400', 'not': '0'}
+    assert (rule['target'], rule['local-port'], rule['pass']) == ('10.0.0.50', '32400', 'pass')
+
+
+def test_matching_state_changes_nothing():
+    api = FakeOPNsense()
+    api.reservations = [reservation('00:00:5e:00:53:70', '10.0.0.112', OWNER_TAG)]
+    api.nat = [{'uuid': 'n1', 'descr': OWNER_TAG + ' plex', 'protocol': 'tcp',
+                'destination.port': '32400', 'target': '10.0.0.50', 'local-port': '32400',
+                'source.network': 'any', 'disabled': '0'}]
+    assert Reconciler(api, 'apply').run(intent_from_system_cfg(SYSTEM_CFG)) == []
+    assert api.posts == []
+
+
+def test_subnet_inherits_global_lease_time():
+    api = FakeOPNsense()
+    api.lease = '86400'
+    Reconciler(api, 'apply').run(Intent(dhcp=[DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.200', 4000)]))
+    assert api.posts[0] == ('/api/kea/dhcpv4/set_subnet/' + SUBNET_UUID,
+                            {'subnet4': {'pools': '10.0.0.100 - 10.0.0.200', 'valid_lifetime': '4000'}})
+
+
+def test_only_owned_reservations_are_removed():
+    api = FakeOPNsense()
+    api.reservations = [
+        reservation('74:ac:b9:17:3d:65', '10.0.0.10', 'USW 16 PoE'),       # made by hand
+        reservation('aa:aa:aa:aa:aa:01', '10.0.0.20', OWNER_TAG + ' x'),   # ours, gone from UniFi
+    ]
+    Reconciler(api, 'apply').run(Intent(dhcp=[DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000)]))
+    assert api.paths() == ['/api/kea/dhcpv4/del_reservation/r-10.0.0.20', '/api/kea/service/reconfigure']
+
+
+def test_hand_made_reservation_is_moved_when_unifi_asks():
+    api = FakeOPNsense()
+    api.reservations = [reservation('74:ac:b9:17:3d:65', '10.0.0.10', 'USW 16 PoE')]
+    scope = DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000, {'74:ac:b9:17:3d:65': '10.0.0.11'})
+    Reconciler(api, 'apply').run(Intent(dhcp=[scope]))
+    assert api.posts[0] == ('/api/kea/dhcpv4/set_reservation/r-10.0.0.10',
+                            {'reservation': {'ip_address': '10.0.0.11'}})
+
+
+def test_reservation_outside_subnet_is_skipped():
+    api = FakeOPNsense()
+    scope = DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000, {'aa:aa:aa:aa:aa:02': '192.168.9.9'})
+    assert Reconciler(api, 'apply').run(Intent(dhcp=[scope])) == []
+
+
+def test_missing_kea_subnet_is_skipped():
+    api = FakeOPNsense()
+    scope = DhcpScope('10.0.40.0/24', '10.0.40.100', '10.0.40.254', 4000, {'aa:aa:aa:aa:aa:03': '10.0.40.5'})
+    assert Reconciler(api, 'apply').run(Intent(dhcp=[scope])) == []
+    assert api.posts == []
+
+
+def test_owned_forward_is_updated_and_removed():
+    api = FakeOPNsense()
+    api.nat = [
+        {'uuid': 'n1', 'descr': OWNER_TAG + ' plex', 'protocol': 'tcp', 'destination.port': '32400',
+         'target': '10.0.0.49', 'local-port': '32400', 'source.network': 'any', 'disabled': '0'},
+        {'uuid': 'n2', 'descr': OWNER_TAG + ' old', 'protocol': 'udp', 'destination.port': '1',
+         'target': '10.0.0.2', 'local-port': '1', 'source.network': 'any', 'disabled': '0'},
+        {'uuid': 'n3', 'descr': 'hand made', 'protocol': 'udp', 'destination.port': '2',
+         'target': '10.0.0.3', 'local-port': '2', 'source.network': 'any', 'disabled': '0'},
+    ]
+    Reconciler(api, 'apply').run(Intent(port_forwards=[PortForward('plex', 'tcp', '32400', '10.0.0.50', '32400')]))
+    assert api.paths() == ['/api/firewall/d_nat/set_rule/n1', '/api/firewall/d_nat/del_rule/n2',
+                           '/api/firewall/d_nat/apply']
+
+
+def test_failed_save_raises():
+    api = FakeOPNsense()
+    api.post = lambda path, body=None: {'result': 'failed', 'validations': {'x': 'bad'}}
+    with pytest.raises(RuntimeError):
+        Reconciler(api, 'apply').run(intent_from_system_cfg(SYSTEM_CFG))
