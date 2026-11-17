@@ -97,9 +97,10 @@ class TestSetparam:
         saved = _read(conf)
         assert saved.get('provisioned', 'cfgversion') == 'abc'
         assert not saved.has_option('provisioned', 'system_cfg')
-        logged = json.loads((tmp_path / 'unhandled.json').read_text())
-        assert logged['setparam/system_cfg']['payload']['value'] == {
-            '_truncated': len(system_cfg), 'keys': ['udapi', 'unifi']}
+        # kept in its own private file instead, and not logged as unhandled
+        stored = json.loads((tmp_path / 'system_cfg.json').read_text())
+        assert stored == json.loads(system_cfg)
+        assert not (tmp_path / 'unhandled.json').exists()
 
     def test_cfgversion_and_interval_are_handled(self, tmp_path, gateway_module):
         import json

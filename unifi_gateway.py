@@ -17,6 +17,7 @@ from collectors import SourceError, create_collector
 from devices import Device
 from isp import IspInfo
 from pingtest import EVENT as PINGTEST_EVENT, PingTests
+from provision import store_system_cfg
 from speedtest import SpeedTest
 from unifi_protocol import (
     LIVE_INFORM_INTERVAL, create_broadcast_message, create_event_inform, create_inform,
@@ -99,7 +100,7 @@ REJECTIONS_BEFORE_RESET = 3
 
 # setparam keys kept out of the config file. system_cfg is the full UDAPI
 # configuration a UXG would apply (including the controller's site token and
-# RADIUS secrets); nothing here uses it.
+# RADIUS secrets); provision.py keeps it in its own private files.
 NOT_PERSISTED_SETPARAM_KEYS = {'_type', 'server_time_in_utc', 'blocked_sta', 'system_cfg'}
 
 
@@ -446,11 +447,13 @@ class UnifiGateway:
             # the inform interval, as in noop
             HANDLED_SETPARAM_KEYS = {
                 '_type', 'server_time_in_utc', 'blocked_sta', 'mgmt_cfg',
-                'cfgversion', 'interval',
+                'cfgversion', 'interval', 'system_cfg',
             }
             for key, value in response.items():
                 if key == 'mgmt_cfg':
                     self._parse_mgmt_cfg(value)
+                elif key == 'system_cfg':
+                    self._on_system_cfg(value)
                 elif key == 'interval':
                     self.interval = value
                 if key not in NOT_PERSISTED_SETPARAM_KEYS:
@@ -609,9 +612,15 @@ class UnifiGateway:
             for k, value in response.items():
                 if k == 'mgmt_cfg':
                     self._parse_mgmt_cfg(value)
+                elif k == 'system_cfg':
+                    self._on_system_cfg(value)
                 if k not in NOT_PERSISTED_SETPARAM_KEYS:
                     self.config.set('provisioned', k, str(value))
             self._save_config()
+
+    def _on_system_cfg(self, value):
+        """Keep the controller's full configuration for this gateway."""
+        store_system_cfg(os.path.dirname(CONFIG_FILE) or '.', value)
 
     def _parse_mgmt_cfg(self, data):
         HANDLED_MGMT_KEYS = {
