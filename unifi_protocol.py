@@ -251,7 +251,11 @@ def _uxg_fields(dc, ports, uptime=0):
         'port_table': port_table,
         'ethernet_overrides': assignments,
         'config_port_table': assignments,
-        'udapi_version': {'version': 48},
+        # Per-path UDAPI versions turn controller features on. dnsForwarder
+        # v4 makes it send the UI's DNS records (services.dnsForwarder
+        # .hostRecords); v7 changes how it writes the gateway's own records,
+        # and other paths switch whole output formats, so add only what's used.
+        'udapi_version': {'version': 48, 'versionDetail': {'services/dnsForwarder': 4}},
         'udapi_caps': 0,
         'usg2_caps': USG2_LIVE_UPDATE | USG2_PING_TEST,
         'inform_min_interval': LIVE_INFORM_INTERVAL,

@@ -8,6 +8,7 @@ until it matches:
 - DHCP (Kea): each subnet's address pool and lease time, and its
   reservations ("Fixed IP" on a client in the UniFi UI), matched by MAC.
 - Port forwards (Destination NAT), each with its own pass rule.
+- DNS records from the UI's DNS page (A and AAAA), as Unbound host overrides.
 
 UniFi is the source of truth for everything listed above, but the reconciler
 only ever deletes objects it created itself. It marks them by starting their
@@ -57,6 +58,7 @@ class PortForward:
 class Intent:
     dhcp: list = field(default_factory=list)
     port_forwards: list = field(default_factory=list)
+    dns_records: dict = field(default_factory=dict)    # {(fqdn, 'A'|'AAAA'): address}
 
 
 def intent_from_system_cfg(cfg):
@@ -107,6 +109,18 @@ def intent_from_system_cfg(cfg):
             internal_port=str(translation.get('port') or destination['port']),
             source=rule.get('source', {}).get('address', ''),
         ))
+
+    # The controller mixes its own records (unifi.<domain>, setup.ui.com, the
+    # gateway's name) into hostRecords. Only records from the UI's DNS page
+    # carry a ttl.
+    forwarder = udapi.get('services', {}).get('dnsForwarder', {})
+    for record in forwarder.get('hostRecords', []):
+        address = record.get('address') or {}
+        name = (record.get('hostName') or '').rstrip('.').lower()
+        if 'ttl' not in record or not address.get('address') or '.' not in name or '*' in name:
+            continue
+        rr = 'AAAA' if address.get('version') == 'v6' else 'A'
+        intent.dns_records[(name, rr)] = address['address']
     return intent
 
 
@@ -135,11 +149,14 @@ class Reconciler:
         changes = []
         kea = self._kea(intent.dhcp, changes)
         nat = self._port_forwards(intent.port_forwards, changes)
+        dns = self._dns_records(intent.dns_records, changes)
         if self.mode == 'apply':
             if kea:
                 self._post('/api/kea/service/reconfigure')
             if nat:
                 self._post('/api/firewall/d_nat/apply')
+            if dns:
+                self._post('/api/unbound/service/reconfigure')
         for text in changes:
             logger.info('%s: %s', 'Applied' if self.mode == 'apply' else 'Would apply', text)
         if not changes:
@@ -256,4 +273,32 @@ class Reconciler:
             if name not in wanted:
                 changes.append('Port forward %r: remove' % name)
                 self._post('/api/firewall/d_nat/del_rule/' + current['uuid'])
+        return len(changes) > before
+
+    # Unbound host overrides
+
+    def _dns_records(self, records, changes):
+        before = len(changes)
+        rows = self.api.get('/api/unbound/settings/search_host_override').get('rows', [])
+        existing = {}
+        for row in rows:
+            fqdn = '%s.%s' % (row.get('hostname', ''), row.get('domain', ''))
+            existing.setdefault((fqdn.strip('.').lower(), row.get('rr', 'A')), row)
+
+        for (fqdn, rr), address in sorted(records.items()):
+            current = existing.get((fqdn, rr))
+            if current is None:
+                hostname, _, domain = fqdn.partition('.')
+                changes.append('DNS %s %s -> %s: add' % (rr, fqdn, address))
+                self._post('/api/unbound/settings/add_host_override', {'host': {
+                    'enabled': '1', 'hostname': hostname, 'domain': domain, 'rr': rr,
+                    'server': address, 'description': OWNER_TAG + ' DNS record from UniFi'}})
+            elif current.get('server') != address or current.get('enabled') != '1':
+                changes.append('DNS %s %s: %s -> %s' % (rr, fqdn, current.get('server'), address))
+                self._post('/api/unbound/settings/set_host_override/' + current['uuid'],
+                           {'host': {'server': address, 'enabled': '1'}})
+        for key, current in sorted(existing.items()):
+            if key not in records and _owned(current.get('description')):
+                changes.append('DNS %s %s: remove' % (key[1], key[0]))
+                self._post('/api/unbound/settings/del_host_override/' + current['uuid'])
         return len(changes) > before

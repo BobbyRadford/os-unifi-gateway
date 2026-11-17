@@ -26,6 +26,16 @@ SYSTEM_CFG = {'udapi': {
          'protocol': 'tcp', 'source': {'sets': ['NETv4_br0']}, 'target': 'MASQUERADE'},
     ],
 }}
+SYSTEM_CFG['udapi']['services']['dnsForwarder'] = {'hostRecords': [
+    # the controller's own records: no ttl
+    {'address': {'address': '10.0.0.5', 'version': 'v4'}, 'hostName': 'unifi.internal',
+     'registerNonQualified': True},
+    {'address': {'address': '10.0.0.1', 'version': 'v4'}, 'hostName': 'setup.ui.com',
+     'registerNonQualified': False},
+    # one from the UI's DNS page
+    {'address': {'address': '10.0.0.50', 'origin': None, 'version': 'v4'},
+     'hostName': 'plex.internal', 'ttl': 0, 'registerNonQualified': False},
+]}
 
 
 class FakeOPNsense:
@@ -36,6 +46,7 @@ class FakeOPNsense:
                          'pools': '10.0.0.100 - 10.0.0.254', 'valid_lifetime': ''}]
         self.reservations = []
         self.nat = []
+        self.hosts = []
         self.lease = '4000'
         self.posts = []
 
@@ -45,6 +56,7 @@ class FakeOPNsense:
             '/api/kea/dhcpv4/search_reservation': {'rows': self.reservations},
             '/api/kea/dhcpv4/get': {'dhcpv4': {'general': {'valid_lifetime': self.lease}}},
             '/api/firewall/d_nat/search_rule': {'rows': self.nat},
+            '/api/unbound/settings/search_host_override': {'rows': self.hosts},
         }[path]
 
     def post(self, path, body=None):
@@ -66,12 +78,13 @@ def test_intent_from_captured_system_cfg():
                                      {'00:00:5e:00:53:70': '10.0.0.112'})]
     # only the DNAT half of a port forward matters; its masquerade is UniFi's
     assert intent.port_forwards == [PortForward('plex', 'tcp', '32400', '10.0.0.50', '32400')]
+    assert intent.dns_records == {('plex.internal', 'A'): '10.0.0.50'}
 
 
 def test_plan_mode_never_posts():
     api = FakeOPNsense()
     changes = Reconciler(api, 'plan').run(intent_from_system_cfg(SYSTEM_CFG))
-    assert len(changes) == 2
+    assert len(changes) == 3
     assert api.posts == []
 
 
@@ -91,9 +104,13 @@ def test_apply_adds_reservation_and_forward_then_reloads():
     assert api.paths() == [
         '/api/kea/dhcpv4/add_reservation',
         '/api/firewall/d_nat/add_rule',
+        '/api/unbound/settings/add_host_override',
         '/api/kea/service/reconfigure',
         '/api/firewall/d_nat/apply',
+        '/api/unbound/service/reconfigure',
     ]
+    host = api.posts[2][1]['host']
+    assert (host['hostname'], host['domain'], host['rr'], host['server']) == ('plex', 'internal', 'A', '10.0.0.50')
     added = api.posts[0][1]['reservation']
     assert added['hw_address'] == '00:00:5e:00:53:70'
     assert added['description'].startswith(OWNER_TAG)
@@ -108,6 +125,8 @@ def test_matching_state_changes_nothing():
     api.nat = [{'uuid': 'n1', 'descr': OWNER_TAG + ' plex', 'protocol': 'tcp',
                 'destination.port': '32400', 'target': '10.0.0.50', 'local-port': '32400',
                 'source.network': 'any', 'disabled': '0'}]
+    api.hosts = [{'uuid': 'h1', 'hostname': 'plex', 'domain': 'internal', 'rr': 'A',
+                  'server': '10.0.0.50', 'enabled': '1', 'description': OWNER_TAG}]
     assert Reconciler(api, 'apply').run(intent_from_system_cfg(SYSTEM_CFG)) == []
     assert api.posts == []
 
@@ -172,3 +191,19 @@ def test_failed_save_raises():
     api.post = lambda path, body=None: {'result': 'failed', 'validations': {'x': 'bad'}}
     with pytest.raises(RuntimeError):
         Reconciler(api, 'apply').run(intent_from_system_cfg(SYSTEM_CFG))
+
+
+def test_dns_records_only_remove_owned():
+    api = FakeOPNsense()
+    api.hosts = [
+        {'uuid': 'h1', 'hostname': 'nas', 'domain': 'internal', 'rr': 'A', 'server': '10.0.0.9',
+         'enabled': '1', 'description': 'hand made'},
+        {'uuid': 'h2', 'hostname': 'old', 'domain': 'internal', 'rr': 'A', 'server': '10.0.0.8',
+         'enabled': '1', 'description': OWNER_TAG + ' x'},
+    ]
+    Reconciler(api, 'apply').run(Intent(dns_records={('nas.internal', 'A'): '10.0.0.7'}))
+    assert api.posts == [
+        ('/api/unbound/settings/set_host_override/h1', {'host': {'server': '10.0.0.7', 'enabled': '1'}}),
+        ('/api/unbound/settings/del_host_override/h2', {}),
+        ('/api/unbound/service/reconfigure', {}),
+    ]
