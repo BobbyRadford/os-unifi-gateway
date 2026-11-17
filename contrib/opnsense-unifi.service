@@ -1,5 +1,5 @@
-# Runs the daemon off the router as a systemd service, for example in the
-# container or VM that hosts UniFi OS Server. Install:
+# Runs the daemon off the router as a systemd service. contrib/proxmox/
+# create-lxc.sh sets all of this up in a Proxmox container. By hand:
 #   apt install git python3-requests python3-cryptography python3-dnspython
 #   useradd --system --home-dir /var/lib/opnsense-unifi --shell /usr/sbin/nologin unifi-gw
 #   install -d -o unifi-gw -g unifi-gw -m 700 /var/lib/opnsense-unifi

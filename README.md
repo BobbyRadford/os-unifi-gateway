@@ -100,9 +100,20 @@ To see what would be sent without talking to a controller:
 docker compose run --rm unifi-gateway dump
 ```
 
+### Running in a Proxmox container
+
+`contrib/proxmox/create-lxc.sh` creates a small Debian container that runs the daemon as a systemd service. Copy it to the Proxmox host and run it as root:
+
+```sh
+CONTROLLER=10.0.0.5 OPNSENSE_HOST=10.0.0.1 \
+OPNSENSE_API_KEY_FILE=/root/apikey.txt BRIDGE=vmbr1 ./create-lxc.sh
+```
+
+The container starts on boot and is tagged `unifi` and `opnsense`. Its notes in the Proxmox UI say where the logs, code, and state live and how to update it. A new install starts in plan mode. Set `STATE_DIR` to a copy of an existing `/var/lib/opnsense-unifi` to move an adopted daemon without adopting it again. The header of the script lists every setting.
+
 ### Running as a systemd service
 
-`contrib/opnsense-unifi.service` runs the daemon on any Debian-like host with systemd, such as the container or VM that runs UniFi OS Server. Its header lists the install steps. The speed test then measures that host's connection.
+`contrib/opnsense-unifi.service` runs the daemon on any Debian-like host with systemd. Its header lists the install steps. The speed test then measures that host's connection.
 
 ### Running from source
 
