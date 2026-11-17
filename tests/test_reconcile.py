@@ -53,7 +53,6 @@ class FakeOPNsense:
                           'ipaddr': '10.0.0.1/24', 'enable': '1'}]
         self.vlans = []
         self.rules = []
-        self.netflow = ['lan']
         self.posts = []
 
     def get(self, path):
@@ -63,8 +62,6 @@ class FakeOPNsense:
             '/api/interfaces/assignment/search_item': {'rows': self.assigned},
             '/api/interfaces/vlan_settings/search_item': {'rows': self.vlans},
             '/api/firewall/filter/search_rule': {'rows': self.rules},
-            '/api/diagnostics/netflow/getconfig': {'netflow': {'capture': {'interfaces': {
-                i: {'value': i.upper(), 'selected': 1} for i in self.netflow}}}},
             '/api/kea/dhcpv4/search_subnet': {'rows': self.subnets},
             '/api/kea/dhcpv4/search_reservation': {'rows': self.reservations},
             '/api/kea/dhcpv4/get': {'dhcpv4': {'general': general}},
@@ -277,17 +274,14 @@ def test_new_network_is_built_in_order():
         '/api/kea/dhcpv4/add_subnet',
         '/api/firewall/filter/add_rule',
         '/api/firewall/filter/add_rule',
-        '/api/diagnostics/netflow/setconfig',
         '/api/kea/service/reconfigure',
         '/api/firewall/filter/apply',
-        '/api/diagnostics/netflow/reconfigure',
     ]
     posts = dict(api.posts)
     assert posts['/api/interfaces/vlan_settings/add_item']['vlan']['if'] == 'vtnet1'
     assert posts['/api/interfaces/assignment/add_item']['interface'] == {
         'if': 'vlan0.99', 'descr': 'TEST99', 'enable': '1', 'type4': 'staticv4', 'ipaddr': '10.0.99.1/24'}
     assert posts['/api/kea/dhcpv4/set'] == {'dhcpv4': {'general': {'interfaces': 'lan,opt1'}}}
-    assert posts['/api/diagnostics/netflow/setconfig'] == {'netflow': {'capture': {'interfaces': 'lan,opt1'}}}
     subnet = posts['/api/kea/dhcpv4/add_subnet']['subnet4']
     assert subnet['pools'] == '10.0.99.100 - 10.0.99.200'
     assert subnet['option_data'] == {'routers': '10.0.99.1', 'domain_name_servers': '10.0.99.1'}
@@ -305,7 +299,6 @@ def test_built_network_changes_nothing():
                         'valid_lifetime': '86400', 'description': OWNER_TAG + ' TEST99',
                         'option_data.routers': '10.0.99.1', 'option_data.domain_name_servers': '10.0.99.1'})
     api.kea_interfaces = ['lan', 'opt1']
-    api.netflow = ['lan', 'opt1']
     api.rules = [dict(body['rule'], uuid='f%d' % i) for i, (path, body) in enumerate(api.posts)
                  if path == '/api/firewall/filter/add_rule']
     api.posts = []
@@ -338,7 +331,6 @@ def test_removed_network_is_taken_apart_after_its_users():
                  {'uuid': 'v7', 'if': 'vtnet1', 'tag': '7', 'vlanif': 'vlan0.7', 'descr': 'hand made'}]
     api.assigned.append({'uuid': 'opt1', 'identifier': 'opt1', 'if': 'vlan0.99', 'ipaddr': '10.0.99.1/24', 'enable': '1'})
     api.kea_interfaces = ['lan', 'opt1']
-    api.netflow = ['lan', 'opt1']
     api.subnets.append({'uuid': 'sub-99', 'subnet': '10.0.99.0/24', 'description': OWNER_TAG + ' TEST99'})
     api.reservations = [reservation('aa:aa:aa:aa:aa:99', '10.0.99.5', OWNER_TAG)]
     api.reservations[0]['subnet'] = 'sub-99'
@@ -350,10 +342,8 @@ def test_removed_network_is_taken_apart_after_its_users():
         '/api/kea/dhcpv4/del_reservation/r-10.0.99.5',
         '/api/kea/dhcpv4/del_subnet/sub-99',
         '/api/firewall/filter/del_rule/f1',
-        '/api/diagnostics/netflow/setconfig',
         '/api/kea/service/reconfigure',
         '/api/firewall/filter/apply',
-        '/api/diagnostics/netflow/reconfigure',
         '/api/interfaces/assignment/set_item/opt1',
         '/api/interfaces/assignment/del_item/opt1',
         '/api/interfaces/assignment/reconfigure',
@@ -370,13 +360,6 @@ def test_hand_made_vlan_is_used_and_kept():
     assert '/api/interfaces/vlan_settings/add_item' not in api.paths()
     assert not any('vlan_settings/set_item' in path for path in api.paths())
     assert dict(api.posts)['/api/interfaces/assignment/add_item']['interface']['if'] == 'vlan0.99'
-
-
-def test_netflow_left_alone_when_off():
-    api = FakeOPNsense()
-    api.netflow = []
-    Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
-    assert not any('netflow' in path for path in api.paths())
 
 
 def test_isolation_blocks_each_other_network():
