@@ -652,6 +652,23 @@ class TestClients:
         assert '/FlowSourceAddrTotals/3000/3300/' in flow_calls[-1]
 
 
+    def test_vlan_clients_count_as_lan_clients(self, gateway_config, fake_api):
+        # a VLAN on the LAN NIC shares its MAC
+        add_row(fake_api, device='vlan01', identifier='opt3', description='IoT',
+                macaddr='00:00:5e:00:53:01', status='up', addr4='10.0.40.1/24')
+        fake_api.responses['/api/diagnostics/interface/search_arp']['rows'].append(
+            {'mac': '00:00:5e:00:53:40', 'ip': '10.0.40.5', 'intf': 'vlan01', 'expired': False,
+             'hostname': '', 'intf_description': 'IoT'})
+        fake_api.responses['/api/diagnostics/networkinsight/top/'] = (
+            lambda path: [{'src_addr': '10.0.40.5', 'total': 40}] if 'vlan01' in path else [])
+        with patch('collectors.opnsense.time.time', return_value=3600.0):
+            dc = make(gateway_config, fake_api)
+        host = [h for h in dc.data['host_table'] if h['ip'] == '10.0.40.5'][0]
+        assert (host['tx_bytes'], host['rx_bytes']) == (40, 40)
+        flows = [c for c in fake_api.calls if 'networkinsight' in c]
+        assert len(flows) == 4 and sum('vlan01' in c for c in flows) == 2
+
+
 
 class TestLanConfig:
     """config_network_lan: the controller makes its LAN match it at adoption."""

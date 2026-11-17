@@ -9,7 +9,8 @@ until it matches:
   interface with the gateway address, a Kea subnet that Kea listens on, and
   a rule passing the network's traffic. An isolated network's rule leaves
   out the other local networks, as UniFi's isolation does: it can't start
-  connections to them, but they can still reach it.
+  connections to them, but they can still reach it. NetFlow captures each
+  network's interface too, if it is capturing the LAN.
 - DHCP (Kea): each subnet's address pool and lease time (and, for the
   networks above, its router and DNS server), and its reservations ("Fixed IP" on a client in the UniFi UI), matched by MAC.
 - Port forwards (Destination NAT), each with its own pass rule.
@@ -219,6 +220,7 @@ class Reconciler:
         ifaces, removals = self._networks(intent.networks, changes)
         kea = self._kea(intent.dhcp, intent.networks, ifaces, removals, changes)
         rules = self._rules(intent.networks, ifaces, changes)
+        netflow = self._netflow(ifaces, removals, changes)
         nat = self._port_forwards(intent.port_forwards, changes)
         dns = self._dns_records(intent.dns_records, changes)
         if self.mode == 'apply':
@@ -226,6 +228,8 @@ class Reconciler:
                 self._post('/api/kea/service/reconfigure')
             if rules:
                 self._post('/api/firewall/filter/apply')
+            if netflow:
+                self._post('/api/diagnostics/netflow/reconfigure')
             if nat:
                 self._post('/api/firewall/d_nat/apply')
             if dns:
@@ -365,6 +369,27 @@ class Reconciler:
                 changes.append('Rule %r: remove' % current['description'])
                 self._post('/api/firewall/filter/del_rule/' + current['uuid'])
         return len(changes) > before
+
+    # NetFlow, for per-client traffic
+
+    def _netflow(self, ifaces, removals, changes):
+        """Captures traffic on each network's interface too, but only when
+        NetFlow is already capturing something."""
+        if not ifaces and not removals:
+            return False
+        config = self.api.get('/api/diagnostics/netflow/getconfig').get('netflow', {})
+        capture = config.get('capture', {}).get('interfaces') or {}
+        current = [key for key, value in capture.items() if value.get('selected')]
+        if not current:
+            return False
+        drop = {iface['identifier'] for _, iface in removals if iface}
+        want = [i for i in current if i not in drop]
+        want += [i for i in ifaces.values() if i and i not in want]
+        if want == current:
+            return False
+        changes.append('NetFlow capture: %s -> %s' % (','.join(current), ','.join(want)))
+        self._post('/api/diagnostics/netflow/setconfig', {'netflow': {'capture': {'interfaces': ','.join(want)}}})
+        return True
 
     # Kea DHCPv4
 

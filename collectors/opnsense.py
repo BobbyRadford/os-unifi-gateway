@@ -294,6 +294,12 @@ class OPNsenseCollector:
             )
 
         self._devices = {'wan': wan.get('device', ''), 'lan': lan.get('device', '')}
+        # a VLAN on the LAN NIC has the NIC's MAC, and its clients are LAN clients too
+        lan_mac = (lan.get('macaddr') or ZERO_MAC).lower()
+        self._lan_devices = [self.lan_device] + sorted(
+            r['device'] for r in rows
+            if r.get('identifier') and r.get('device') not in (None, '', self.lan_device)
+            and lan_mac != ZERO_MAC and (r.get('macaddr') or '').lower() == lan_mac)
         self.data['ports'] = sorted([
             {'ifname': self.wan_port, 'name': wan.get('description', 'WAN'),
              'type': 'wan', 'realif': self.wan_device},
@@ -683,7 +689,8 @@ class OPNsenseCollector:
         The FlowSourceAddrTotals aggregate counts each flow twice: once under
         its source on the ingress interface (direction 'in') and once under
         its destination on the egress interface (direction 'out'). On the LAN
-        side those are a client's upload and download. Each 5-minute bucket is
+        side those are a client's upload and download, on the LAN NIC and on
+        each VLAN over it. Each 5-minute bucket is
         queried once, so nothing is counted twice.
 
         NetFlow exports a long connection only every activeTimeout seconds,
@@ -698,14 +705,16 @@ class OPNsenseCollector:
             return
 
         totals = {}
-        for direction, counter in (('in', 'tx_bytes'), ('out', 'rx_bytes')):
-            rows = self._call('flow_totals', since, until, self.lan_device, direction)
-            if rows is None:
-                return
-            for row in rows:
-                addr = row.get('src_addr')
-                if addr:
-                    totals.setdefault(addr, {})[counter] = int(float(row.get('total') or 0))
+        for device in self._lan_devices:
+            for direction, counter in (('in', 'tx_bytes'), ('out', 'rx_bytes')):
+                rows = self._call('flow_totals', since, until, device, direction)
+                if rows is None:
+                    return
+                for row in rows:
+                    addr = row.get('src_addr')
+                    if addr:
+                        entry = totals.setdefault(addr, {})
+                        entry[counter] = entry.get(counter, 0) + int(float(row.get('total') or 0))
 
         for addr, counts in totals.items():
             entry = self._flow_totals.setdefault(addr, {'rx_bytes': 0, 'tx_bytes': 0})
@@ -737,7 +746,7 @@ class OPNsenseCollector:
 
         for row in rows:
             # the router's own address is a permanent entry, not a client
-            if row.get('intf') != self.lan_device or row.get('expired') or not row.get('mac') \
+            if row.get('intf') not in self._lan_devices or row.get('expired') or not row.get('mac') \
                     or row['mac'].lower() in self.data.get('macs', {}).values():
                 continue
             mac = row['mac'].lower()
