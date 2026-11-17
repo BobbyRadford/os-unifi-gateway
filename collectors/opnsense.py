@@ -296,10 +296,18 @@ class OPNsenseCollector:
         self._devices = {'wan': wan.get('device', ''), 'lan': lan.get('device', '')}
         # a VLAN on the LAN NIC has the NIC's MAC, and its clients are LAN clients too
         lan_mac = (lan.get('macaddr') or ZERO_MAC).lower()
-        self._lan_devices = [self.lan_device] + sorted(
-            r['device'] for r in rows
-            if r.get('identifier') and r.get('device') not in (None, '', self.lan_device)
-            and lan_mac != ZERO_MAC and (r.get('macaddr') or '').lower() == lan_mac)
+        vlans = [r for r in rows
+                 if r.get('identifier') and r.get('device') not in (None, '', self.lan_device)
+                 and lan_mac != ZERO_MAC and (r.get('macaddr') or '').lower() == lan_mac]
+        self._lan_devices = [self.lan_device] + sorted(r['device'] for r in vlans)
+        # the controller files a client under the network of its `vlan`
+        self._vlan_subnets = {}
+        for r in vlans:
+            try:
+                subnet = ipaddress.ip_interface(r.get('addr4') or '').network
+                self._vlan_subnets[subnet] = int(r['vlan_tag'])
+            except (TypeError, ValueError, KeyError):
+                continue
         self.data['ports'] = sorted([
             {'ifname': self.wan_port, 'name': wan.get('description', 'WAN'),
              'type': 'wan', 'realif': self.wan_device},
@@ -722,6 +730,13 @@ class OPNsenseCollector:
             entry['tx_bytes'] += counts.get('tx_bytes', 0)
         self._flow_until = until
 
+    def _vlan_of(self, ip):
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            return None
+        return next((tag for subnet, tag in self._vlan_subnets.items() if address in subnet), None)
+
     def _build_host_table(self):
         """LAN clients from the ARP table, merged with DHCP leases."""
         rows = self._call('arp')
@@ -742,6 +757,9 @@ class OPNsenseCollector:
                 'rx_packets': 0, 'tx_packets': 0, 'bc_bytes': 0, 'mc_bytes': 0,
             }
             entry.update(self._flow_totals.get(ip, {}))
+            vlan = self._vlan_of(ip)
+            if vlan:
+                entry['vlan'] = vlan
             hosts[mac] = entry
 
         for row in rows:
