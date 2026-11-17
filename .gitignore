@@ -14,3 +14,5 @@ conf/speedtest.json
 dist/
 .pytest_cache/
 .ruff_cache/
+.venv/
+conf/system_cfg*.json

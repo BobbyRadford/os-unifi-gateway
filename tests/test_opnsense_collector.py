@@ -424,16 +424,16 @@ class TestClients:
         dc = make(gateway_config, fake_api)
         assert dc._lease_server == 'dnsmasq'
         assert dc.data['dhcp_leases'] == [
-            {'mac': '00:00:5e:00:53:02', 'ip': '192.168.48.2', 'expire': 1, 'hostname': 'pi'},
-            {'mac': 'aa:aa:aa:aa:aa:09', 'ip': '192.168.48.9', 'expire': 1},
+            {'mac': '00:00:5e:00:53:02', 'ip': '192.168.48.2', 'expire': 4102444800, 'hostname': 'pi'},
+            {'mac': 'aa:aa:aa:aa:aa:09', 'ip': '192.168.48.9', 'expire': 4102444800},
         ]
 
     def test_lease_expiry(self, gateway_config, fake_api):
         rows = fake_api.responses['/api/dnsmasq/leases/search']['rows']
-        rows[0]['expire'] = 1700000000
+        rows[0]['expire'] = 4102444800
         rows[1]['expire'] = 0  # a lease that never ends
         dc = make(gateway_config, fake_api)
-        assert [lease.get('expire') for lease in dc.data['dhcp_leases']] == [1700000000, None]
+        assert [lease.get('expire') for lease in dc.data['dhcp_leases']] == [4102444800, None]
 
     def test_kea_leases(self, gateway_config, fake_api):
         leases = fake_api.responses.pop('/api/dnsmasq/leases/search')
@@ -464,6 +464,17 @@ class TestClients:
         dc.updated['dhcp_leases'] = 0
         dc.update()
         assert dc.data['dhcp_leases'] == []
+
+    def test_expired_leases_do_not_win(self, gateway_config, fake_api):
+        # a disabled Dnsmasq keeps its last leases forever; Kea's live ones win
+        stale = fake_api.responses['/api/dnsmasq/leases/search']
+        for row in stale['rows']:
+            row['expire'] = 1771249002
+        fake_api.responses['/api/kea/leases4/search'] = {'total': 1, 'rows': [
+            {'address': '10.0.0.10', 'hwaddr': '74:ac:b9:17:3d:65', 'expire': 4102444800}]}
+        dc = make(gateway_config, fake_api)
+        assert dc._lease_server == 'kea'
+        assert [lease['ip'] for lease in dc.data['dhcp_leases']] == ['10.0.0.10']
 
     def test_dhcp_none(self, gateway_config, fake_api):
         gateway_config.set('opnsense', 'dhcp', 'none')

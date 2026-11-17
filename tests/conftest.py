@@ -72,8 +72,8 @@ ARP = {
 
 DNSMASQ_LEASES = {
     'total': 2, 'rows': [
-        {'address': '192.168.48.2', 'hwaddr': '00:00:5E:00:53:02', 'hostname': 'pi', 'expire': 1},
-        {'address': '192.168.48.9', 'hwaddr': 'aa:aa:aa:aa:aa:09', 'hostname': '*', 'expire': 1},
+        {'address': '192.168.48.2', 'hwaddr': '00:00:5E:00:53:02', 'hostname': 'pi', 'expire': 4102444800},
+        {'address': '192.168.48.9', 'hwaddr': 'aa:aa:aa:aa:aa:09', 'hostname': '*', 'expire': 4102444800},
     ],
 }
 

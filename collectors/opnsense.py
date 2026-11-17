@@ -648,6 +648,7 @@ class OPNsenseCollector:
     @staticmethod
     def _parse_leases(rows):
         leases = []
+        now = time.time()
         for row in rows:
             mac = row.get('hwaddr') or row.get('mac') or ''
             ip = row.get('address') or row.get('ip') or ''
@@ -660,6 +661,10 @@ class OPNsenseCollector:
             # that never ends
             expire = _leading_number(row.get('expire')) or 0
             if expire > 0:
+                # a disabled server's lease file keeps its last leases
+                # forever, and they would win `dhcp = auto` over the live one
+                if expire < now:
+                    continue
                 lease['expire'] = int(expire)
             hostname = row.get('hostname') or row.get('client_hostname')
             if hostname and hostname != '*':
