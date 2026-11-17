@@ -217,32 +217,42 @@ class Reconciler:
         """Reconcile once. Returns the list of changes as text."""
         if self.mode == 'off':
             return []
-        changes = []
-        # new networks first and old ones last, so nothing is removed while
-        # a Kea subnet or rule still refers to it
-        ifaces, removals = self._networks(intent.networks, changes)
-        kea = self._kea(intent.dhcp, intent.networks, ifaces, removals, changes)
-        rules = self._rules(intent.networks, ifaces, changes)
-        netflow = self._netflow(ifaces, removals, changes)
-        nat = self._port_forwards(intent.port_forwards, changes)
-        dns = self._dns_records(intent.dns_records, changes)
-        if self.mode == 'apply':
-            if kea:
-                self._post('/api/kea/service/reconfigure')
-            if rules:
-                self._post('/api/firewall/filter/apply')
-            if netflow:
-                self._post('/api/diagnostics/netflow/reconfigure')
-            if nat:
-                self._post('/api/firewall/d_nat/apply')
-            if dns:
-                self._post('/api/unbound/service/reconfigure')
+        changes, reload = [], []
+        try:
+            # new networks first and old ones last, so nothing is removed
+            # while a Kea subnet or rule still refers to it
+            ifaces, removals = self._networks(intent.networks, changes)
+            steps = (
+                (lambda: self._kea(intent.dhcp, intent.networks, ifaces, removals, changes),
+                 '/api/kea/service/reconfigure'),
+                (lambda: self._rules(intent.networks, ifaces, changes), '/api/firewall/filter/apply'),
+                (lambda: self._netflow(ifaces, removals, changes), '/api/diagnostics/netflow/reconfigure'),
+                (lambda: self._port_forwards(intent.port_forwards, changes), '/api/firewall/d_nat/apply'),
+                (lambda: self._dns_records(intent.dns_records, changes), '/api/unbound/service/reconfigure'),
+            )
+            for step, apply_path in steps:
+                if step():
+                    reload.append(apply_path)
+        except Exception:
+            # what was saved before the failure still gets applied, since the
+            # next run will find it saved and see nothing to do
+            self._reload(reload)
+            self._log(changes)
+            raise
+        self._reload(reload)
         self._remove_networks(removals, changes)
+        self._log(changes)
+        return changes
+
+    def _reload(self, paths):
+        for path in paths:
+            self._post(path)
+
+    def _log(self, changes):
         for text in changes:
             logger.info('%s: %s', 'Applied' if self.mode == 'apply' else 'Would apply', text)
         if not changes:
             logger.debug('OPNsense already matches the controller')
-        return changes
 
     def _post(self, path, body=None):
         if self.mode != 'apply':

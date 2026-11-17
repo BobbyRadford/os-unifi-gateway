@@ -387,3 +387,17 @@ def test_isolation_blocks_each_other_network():
     rules = [body['rule'] for path, body in api.posts if path == '/api/firewall/filter/add_rule']
     assert sorted((r['action'], r['destination_net']) for r in rules) == [
         ('block', '10.0.0.0/24'), ('block', '10.0.50.0/24'), ('pass', 'any')]
+
+
+def test_saved_changes_are_applied_when_a_later_step_fails():
+    api = FakeOPNsense()
+    post = api.post
+
+    def refuse_rules(path, body=None):
+        if path == '/api/firewall/filter/add_rule':
+            return {'result': 'failed', 'validations': {'rule.destination_net': 'bad'}}
+        return post(path, body)
+    api.post = refuse_rules
+    with pytest.raises(RuntimeError):
+        Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
+    assert api.paths()[-1] == '/api/kea/service/reconfigure'
