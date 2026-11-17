@@ -318,6 +318,8 @@ class Reconciler:
         for vlan, iface in removals:
             if iface:
                 changes.append('Interface %s on VLAN %s: remove' % (iface['identifier'], vlan['tag']))
+                # new interfaces are locked, and OPNsense won't remove a locked one
+                self._post('/api/interfaces/assignment/set_item/' + iface['uuid'], {'interface': {'lock': '0'}})
                 self._post('/api/interfaces/assignment/del_item/' + iface['uuid'])
         if any(iface for _, iface in removals):
             self._post('/api/interfaces/assignment/reconfigure')

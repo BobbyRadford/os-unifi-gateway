@@ -339,6 +339,7 @@ def test_removed_network_is_taken_apart_after_its_users():
         '/api/firewall/filter/del_rule/f1',
         '/api/kea/service/reconfigure',
         '/api/firewall/filter/apply',
+        '/api/interfaces/assignment/set_item/opt1',
         '/api/interfaces/assignment/del_item/opt1',
         '/api/interfaces/assignment/reconfigure',
         '/api/interfaces/vlan_settings/del_item/v99',
