@@ -110,6 +110,22 @@ UNIFI_ADOPT_URL=http://controller:8080/inform python unifi_gateway.py run
 
 Commands: `run` (foreground), `set-adopt -s <url>`, `dump`, `status`.
 
+## Managing OPNsense from UniFi
+
+With `[apply] mode = apply` the daemon also works in the other direction. The controller sends a gateway its whole configuration whenever something changes, and the daemon makes OPNsense match it through the REST API:
+
+| Set in UniFi | Changes in OPNsense |
+|---|---|
+| A network's DHCP range and lease time | the Kea subnet's pool and lease time |
+| Fixed IP on a client | a Kea reservation for its MAC |
+| Port forwarding rules | Destination NAT rules, each passing its own traffic |
+
+The daemon only deletes what it created. Its objects have descriptions starting with `[unifi]`; anything made by hand stays, though a hand-made reservation is moved if UniFi gives the same MAC a different address. Kea subnets are never created, so set up a network's subnet in OPNsense first. `mode = plan` logs what would change without changing anything, which is the safe way to try it.
+
+Before turning it on, make the network in UniFi match OPNsense (subnet, DHCP range, lease time), or the first push changes OPNsense to UniFi's values. Adoption already copies the subnet and range.
+
+Each configuration the controller pushes is kept in `system_cfg.json`, with every version in `system_cfg-history/`, both readable only by the daemon's user. It includes the site's secrets.
+
 ## Configuration reference
 
 Only needed for Docker or source installs.
@@ -129,6 +145,7 @@ Environment variables override the config file.
 | `UNIFI_GW_FIRMWARE` | Pin the reported firmware instead of tracking the latest |
 | `UNIFI_GW_HOSTNAME` | Hostname reported to the controller (default: the router's hostname) |
 | `UNIFI_GW_SOURCE` | `api` (default) or `local` (on the router itself) |
+| `UNIFI_GW_APPLY` | `off` (default), `plan` or `apply`; see [Managing OPNsense from UniFi](#managing-opnsense-from-unifi) |
 | `UNIFI_GW_CONFIG` | Config file path (default `conf/unifi-gateway.conf`) |
 | `UNIFI_GW_LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `UNIFI_GW_LOG_FILE` | Log to a file instead of stderr |
@@ -152,6 +169,10 @@ verify_ssl = False
 # firmware = latest
 # hostname = my-gateway
 # speedtest_file = /path/to/speedtest.json
+
+[apply]
+# off, plan or apply (needs the api source)
+# mode = off
 ```
 
 Adoption state is added to the file automatically; don't edit it.

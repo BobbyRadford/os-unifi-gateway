@@ -243,8 +243,9 @@ class Reconciler:
         for name, forward in sorted(wanted.items()):
             rule = self._nat_rule(forward)
             current = owned.get(name)
-            summary = '%s %s -> %s:%s' % (forward.protocol, forward.external_port,
-                                          forward.internal_ip, forward.internal_port)
+            summary = '%s %s -> %s:%s%s' % (
+                forward.protocol, forward.external_port, forward.internal_ip,
+                forward.internal_port, ' from ' + forward.source if forward.source else '')
             if current is None:
                 changes.append('Port forward %r (%s): add' % (name, summary))
                 self._post('/api/firewall/d_nat/add_rule', {'rule': rule})
