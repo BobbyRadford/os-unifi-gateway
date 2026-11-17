@@ -1,0 +1,34 @@
+# Runs the daemon off the router as a systemd service, for example in the
+# container or VM that hosts UniFi OS Server. Install:
+#   apt install git python3-requests python3-cryptography python3-dnspython
+#   useradd --system --home-dir /var/lib/opnsense-unifi --shell /usr/sbin/nologin unifi-gw
+#   install -d -o unifi-gw -g unifi-gw -m 700 /var/lib/opnsense-unifi
+#   git clone <this repo> /opt/opnsense-unifi
+# then put unifi-gateway.conf (with api_key_file and [apply] mode) and the
+# apikey.txt OPNsense gives you in /var/lib/opnsense-unifi, set the inform URL
+# below, and `systemctl enable --now opnsense-unifi`.
+[Unit]
+Description=OPNsense as a UniFi gateway (os-unifi-gateway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=unifi-gw
+Group=unifi-gw
+WorkingDirectory=/opt/opnsense-unifi
+Environment=UNIFI_GW_CONFIG=/var/lib/opnsense-unifi/unifi-gateway.conf
+Environment=UNIFI_ADOPT_URL=http://CONTROLLER-IP:8080/inform
+Environment=UNIFI_GW_LOG_LEVEL=INFO
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/opnsense-unifi/unifi_gateway.py run
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/opnsense-unifi
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

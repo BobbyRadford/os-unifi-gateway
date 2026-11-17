@@ -100,6 +100,10 @@ To see what would be sent without talking to a controller:
 docker compose run --rm unifi-gateway dump
 ```
 
+### Running as a systemd service
+
+`contrib/opnsense-unifi.service` runs the daemon on any Debian-like host with systemd, such as the container or VM that runs UniFi OS Server. Its header lists the install steps. The speed test then measures that host's connection.
+
 ### Running from source
 
 ```sh
