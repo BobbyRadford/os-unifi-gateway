@@ -341,30 +341,29 @@ class Reconciler:
     @staticmethod
     def _rules_for(network, iface):
         """A network's rules by kind: one passing its traffic and, when it is
-        isolated, one ahead of it blocking the other local networks.
-        OPNsense can't invert a list of networks, so this takes two rules."""
-        def rule(kind, action, destination, sequence):
+        isolated, one ahead of it for each other local network, blocking it.
+        OPNsense rules made through the API take a single network."""
+        def rule(action, destination, sequence, description):
             return {
                 'enabled': '1', 'action': action, 'quick': '1', 'direction': 'in',
                 'interface': iface, 'ipprotocol': 'inet', 'source_net': iface,
                 'destination_net': destination, 'destination_not': '0',
                 'sequence': str(RULE_SEQUENCE + 2 * network.vlan + sequence),
-                'description': '%s VLAN %d%s: %s' % (OWNER_TAG, network.vlan,
-                                                    ' isolation' if kind == 'isolation' else '',
-                                                    network.name),
+                'description': '%s VLAN %d%s: %s' % (OWNER_TAG, network.vlan, description, network.name),
             }
-        rules = {'pass': rule('pass', 'pass', 'any', 1)}
-        if network.isolated and network.others:
-            rules['isolation'] = rule('isolation', 'block', ','.join(network.others), 0)
+        rules = {'pass': rule('pass', 'any', 1, '')}
+        if network.isolated:
+            for other in network.others:
+                rules[other] = rule('block', other, 0, ' to %s blocked' % other)
         return rules
 
     def _rules(self, networks, ifaces, changes):
         before = len(changes)
         owned = {}
         for row in self.api.get('/api/firewall/filter/search_rule').get('rows', []):
-            match = re.match(re.escape(OWNER_TAG) + r' VLAN (\d+)( isolation)?:', row.get('description') or '')
+            match = re.match(re.escape(OWNER_TAG) + r' VLAN (\d+)(?: to (\S+) blocked)?:', row.get('description') or '')
             if match:
-                owned[(int(match.group(1)), 'isolation' if match.group(2) else 'pass')] = row
+                owned[(int(match.group(1)), match.group(2) or 'pass')] = row
         wanted = set()
         for network in networks:
             for kind, want in sorted(self._rules_for(network, ifaces.get(network.vlan) or '').items()):

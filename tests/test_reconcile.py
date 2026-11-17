@@ -377,3 +377,13 @@ def test_netflow_left_alone_when_off():
     api.netflow = []
     Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
     assert not any('netflow' in path for path in api.paths())
+
+
+def test_isolation_blocks_each_other_network():
+    # OPNsense takes one network per API-made rule
+    api = FakeOPNsense()
+    network = Network(40, 'IoT', '10.0.40.1/24', isolated=True, others=['10.0.0.0/24', '10.0.50.0/24'])
+    Reconciler(api, 'apply').run(Intent(networks=[network]))
+    rules = [body['rule'] for path, body in api.posts if path == '/api/firewall/filter/add_rule']
+    assert sorted((r['action'], r['destination_net']) for r in rules) == [
+        ('block', '10.0.0.0/24'), ('block', '10.0.50.0/24'), ('pass', 'any')]
