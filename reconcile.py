@@ -7,9 +7,9 @@ until it matches:
 
 - Networks with a VLAN ID and a gateway address: a VLAN on the LAN port, an
   interface with the gateway address, a Kea subnet that Kea listens on, and
-  a rule passing the network's traffic. An isolated network's rule leaves
-  out the other local networks, as UniFi's isolation does: it can't start
-  connections to them, but they can still reach it. NetFlow captures each
+  a rule passing the network's traffic. An isolated network also gets a
+  rule blocking the other local networks, as UniFi's isolation does: it
+  can't start connections to them, but they can still reach it. NetFlow captures each
   network's interface too, if it is capturing the LAN.
 - DHCP (Kea): each subnet's address pool and lease time (and, for the
   networks above, its router and DNS server), and its reservations ("Fixed IP" on a client in the UniFi UI), matched by MAC.
@@ -34,6 +34,9 @@ from dataclasses import dataclass, field
 logger = logging.getLogger('unifi-gateway')
 
 OWNER_TAG = '[unifi]'
+
+# Where the network rules go in OPNsense's rule order (the default is 100)
+RULE_SEQUENCE = 20000
 
 # The UXG port the LAN runs on. Its VLANs become VLANs on OPNsense's LAN NIC.
 LAN_PORT = 'eth1'
@@ -336,36 +339,46 @@ class Reconciler:
     # Firewall rules for networks
 
     @staticmethod
-    def _rule(network, iface):
-        return {
-            'enabled': '1', 'action': 'pass', 'quick': '1', 'direction': 'in',
-            'interface': iface, 'ipprotocol': 'inet', 'source_net': iface,
-            'destination_net': ','.join(network.others) if network.isolated and network.others else 'any',
-            'destination_not': '1' if network.isolated and network.others else '0',
-            'description': '%s VLAN %d: %s%s' % (OWNER_TAG, network.vlan, network.name,
-                                                ' (isolated)' if network.isolated else ''),
-        }
+    def _rules_for(network, iface):
+        """A network's rules by kind: one passing its traffic and, when it is
+        isolated, one ahead of it blocking the other local networks.
+        OPNsense can't invert a list of networks, so this takes two rules."""
+        def rule(kind, action, destination, sequence):
+            return {
+                'enabled': '1', 'action': action, 'quick': '1', 'direction': 'in',
+                'interface': iface, 'ipprotocol': 'inet', 'source_net': iface,
+                'destination_net': destination, 'destination_not': '0',
+                'sequence': str(RULE_SEQUENCE + 2 * network.vlan + sequence),
+                'description': '%s VLAN %d%s: %s' % (OWNER_TAG, network.vlan,
+                                                    ' isolation' if kind == 'isolation' else '',
+                                                    network.name),
+            }
+        rules = {'pass': rule('pass', 'pass', 'any', 1)}
+        if network.isolated and network.others:
+            rules['isolation'] = rule('isolation', 'block', ','.join(network.others), 0)
+        return rules
 
     def _rules(self, networks, ifaces, changes):
         before = len(changes)
         owned = {}
         for row in self.api.get('/api/firewall/filter/search_rule').get('rows', []):
-            match = re.match(re.escape(OWNER_TAG) + r' VLAN (\d+):', row.get('description') or '')
+            match = re.match(re.escape(OWNER_TAG) + r' VLAN (\d+)( isolation)?:', row.get('description') or '')
             if match:
-                owned[int(match.group(1))] = row
+                owned[(int(match.group(1)), 'isolation' if match.group(2) else 'pass')] = row
+        wanted = set()
         for network in networks:
-            want = self._rule(network, ifaces.get(network.vlan) or '')
-            current = owned.get(network.vlan)
-            if current is None:
-                changes.append('Rule %r: add' % want['description'])
-                self._post('/api/firewall/filter/add_rule', {'rule': want})
-            elif any(current.get(key) != want[key] for key in
-                     ('description', 'source_net', 'destination_net', 'destination_not')):
-                changes.append('Rule %r: update' % want['description'])
-                self._post('/api/firewall/filter/set_rule/' + current['uuid'], {'rule': want})
-        wanted = {network.vlan for network in networks}
-        for vlan, current in sorted(owned.items()):
-            if vlan not in wanted:
+            for kind, want in sorted(self._rules_for(network, ifaces.get(network.vlan) or '').items()):
+                wanted.add((network.vlan, kind))
+                current = owned.get((network.vlan, kind))
+                if current is None:
+                    changes.append('Rule %r: add' % want['description'])
+                    self._post('/api/firewall/filter/add_rule', {'rule': want})
+                elif any(current.get(key) != want[key] for key in
+                         ('description', 'action', 'source_net', 'destination_net', 'sequence')):
+                    changes.append('Rule %r: update' % want['description'])
+                    self._post('/api/firewall/filter/set_rule/' + current['uuid'], {'rule': want})
+        for key, current in sorted(owned.items()):
+            if key not in wanted:
                 changes.append('Rule %r: remove' % current['description'])
                 self._post('/api/firewall/filter/del_rule/' + current['uuid'])
         return len(changes) > before

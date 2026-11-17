@@ -276,6 +276,7 @@ def test_new_network_is_built_in_order():
         '/api/kea/dhcpv4/set',
         '/api/kea/dhcpv4/add_subnet',
         '/api/firewall/filter/add_rule',
+        '/api/firewall/filter/add_rule',
         '/api/diagnostics/netflow/setconfig',
         '/api/kea/service/reconfigure',
         '/api/firewall/filter/apply',
@@ -290,10 +291,11 @@ def test_new_network_is_built_in_order():
     subnet = posts['/api/kea/dhcpv4/add_subnet']['subnet4']
     assert subnet['pools'] == '10.0.99.100 - 10.0.99.200'
     assert subnet['option_data'] == {'routers': '10.0.99.1', 'domain_name_servers': '10.0.99.1'}
-    rule = posts['/api/firewall/filter/add_rule']['rule']
-    # isolated: everything but the other local networks
-    assert (rule['interface'], rule['source_net'], rule['destination_net'], rule['destination_not']) == (
-        'opt1', 'opt1', '10.0.0.0/24', '1')
+    block, allow = [body['rule'] for path, body in api.posts if path == '/api/firewall/filter/add_rule']
+    # isolated: the other local networks are blocked ahead of the pass rule
+    assert (block['action'], block['source_net'], block['destination_net']) == ('block', 'opt1', '10.0.0.0/24')
+    assert (allow['action'], allow['interface'], allow['destination_net']) == ('pass', 'opt1', 'any')
+    assert int(block['sequence']) < int(allow['sequence'])
 
 
 def test_built_network_changes_nothing():
@@ -304,7 +306,8 @@ def test_built_network_changes_nothing():
                         'option_data.routers': '10.0.99.1', 'option_data.domain_name_servers': '10.0.99.1'})
     api.kea_interfaces = ['lan', 'opt1']
     api.netflow = ['lan', 'opt1']
-    api.rules = [dict(dict(api.posts)['/api/firewall/filter/add_rule']['rule'], uuid='f1')]
+    api.rules = [dict(body['rule'], uuid='f%d' % i) for i, (path, body) in enumerate(api.posts)
+                 if path == '/api/firewall/filter/add_rule']
     api.posts = []
     assert Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG)) == []
 
@@ -312,19 +315,21 @@ def test_built_network_changes_nothing():
 def test_plan_mode_plans_a_new_network_without_posting():
     api = FakeOPNsense()
     changes = Reconciler(api, 'plan').run(intent_from_system_cfg(VLAN_CFG))
-    assert len(changes) == 4      # VLAN, interface, Kea subnet, and rule
+    assert len(changes) == 5      # VLAN, interface, Kea subnet, and two rules
     assert api.posts == []
 
 
 def test_turning_isolation_off_updates_the_rule():
     api = FakeOPNsense()
     Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
-    api.rules = [dict(dict(api.posts)['/api/firewall/filter/add_rule']['rule'], uuid='f1')]
+    api.rules = [dict(body['rule'], uuid='f%d' % i) for i, (path, body) in enumerate(api.posts)
+                 if path == '/api/firewall/filter/add_rule']
+    block = next(r for r in api.rules if r['action'] == 'block')
     api.posts = []
     network = Network(99, 'TEST99', '10.0.99.1/24', others=['10.0.0.0/24'])
     Reconciler(api, 'apply').run(Intent(networks=[network]))
-    rule = dict(api.posts)['/api/firewall/filter/set_rule/f1']['rule']
-    assert (rule['destination_net'], rule['destination_not']) == ('any', '0')
+    rule_calls = [path for path in api.paths() if '/firewall/filter/' in path]
+    assert rule_calls == ['/api/firewall/filter/del_rule/' + block['uuid'], '/api/firewall/filter/apply']
 
 
 def test_removed_network_is_taken_apart_after_its_users():

@@ -132,7 +132,7 @@ With `[apply] mode = apply` the daemon also works in the other direction. The co
 | Set in UniFi | Changes in OPNsense |
 |---|---|
 | A network with a VLAN ID and a gateway IP | a VLAN on the LAN NIC, an interface with the gateway address, a Kea subnet, and a rule passing its traffic |
-| Isolate network | that rule leaves out the other local networks |
+| Isolate network | a rule ahead of it blocking the other local networks |
 | A network's DHCP range and lease time | the Kea subnet's pool and lease time |
 | Fixed IP on a client | a Kea reservation for its MAC |
 | Port forwarding rules | Destination NAT rules, each passing its own traffic |
