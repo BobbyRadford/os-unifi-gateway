@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from reconcile import OWNER_TAG, Intent, DhcpScope, PortForward, Reconciler, intent_from_system_cfg
+from reconcile import OWNER_TAG, Intent, DhcpScope, Network, PortForward, Reconciler, intent_from_system_cfg
 
 SUBNET_UUID = 'sub-1'
 
@@ -48,19 +48,41 @@ class FakeOPNsense:
         self.nat = []
         self.hosts = []
         self.lease = '4000'
+        self.kea_interfaces = ['lan']
+        self.assigned = [{'uuid': 'lan', 'identifier': 'lan', 'if': 'vtnet1',
+                          'ipaddr': '10.0.0.1/24', 'enable': '1'}]
+        self.vlans = []
+        self.rules = []
         self.posts = []
 
     def get(self, path):
+        general = {'valid_lifetime': self.lease,
+                   'interfaces': {i: {'value': i.upper(), 'selected': 1} for i in self.kea_interfaces}}
         return {
+            '/api/interfaces/assignment/search_item': {'rows': self.assigned},
+            '/api/interfaces/vlan_settings/search_item': {'rows': self.vlans},
+            '/api/firewall/filter/search_rule': {'rows': self.rules},
             '/api/kea/dhcpv4/search_subnet': {'rows': self.subnets},
             '/api/kea/dhcpv4/search_reservation': {'rows': self.reservations},
-            '/api/kea/dhcpv4/get': {'dhcpv4': {'general': {'valid_lifetime': self.lease}}},
+            '/api/kea/dhcpv4/get': {'dhcpv4': {'general': general}},
             '/api/firewall/d_nat/search_rule': {'rows': self.nat},
             '/api/unbound/settings/search_host_override': {'rows': self.hosts},
         }[path]
 
     def post(self, path, body=None):
         self.posts.append((path, copy.deepcopy(body)))
+        # OPNsense names new VLAN devices and interfaces itself
+        if path == '/api/interfaces/vlan_settings/add_item':
+            vlan = dict(body['vlan'], uuid='v' + body['vlan']['tag'], vlanif='vlan0.' + body['vlan']['tag'])
+            self.vlans.append(vlan)
+        elif path == '/api/interfaces/assignment/add_item':
+            name = 'opt%d' % len(self.assigned)
+            self.assigned.append(dict(body['interface'], uuid=name, identifier=name))
+            for vlan in self.vlans:
+                if vlan['vlanif'] == body['interface']['if']:
+                    vlan['vlanif'] += ' [%s]' % body['interface']['descr']
+        elif path == '/api/kea/dhcpv4/add_subnet':
+            return {'result': 'saved', 'uuid': 'sub-new'}
         return {'result': 'saved'}
 
     def paths(self):
@@ -207,3 +229,128 @@ def test_dns_records_only_remove_owned():
         ('/api/unbound/settings/del_host_override/h2', {}),
         ('/api/unbound/service/reconfigure', {}),
     ]
+
+
+# A routed VLAN network as Network 10.6.109 sends it (TEST99, then isolated)
+VLAN_CFG = {'udapi': {
+    'interfaces': [
+        {'identification': {'id': 'br0', 'type': 'bridge'}, 'bridge': {'id': 0, 'interfaces': [{'id': 'eth1'}]},
+         'addresses': [{'cidr': '10.0.0.1/24', 'type': 'static', 'version': 'v4'}]},
+        {'identification': {'id': 'eth1.40', 'type': 'vlan'}, 'vlan': {'id': 40, 'interface': {'id': 'eth1'}}},
+        {'identification': {'id': 'br40', 'type': 'bridge'}, 'bridge': {'id': 40, 'interfaces': [{'id': 'eth1.40'}]},
+         'addresses': []},
+        {'identification': {'id': 'eth1.99', 'type': 'vlan'}, 'vlan': {'id': 99, 'interface': {'id': 'eth1'}}},
+        {'identification': {'id': 'br99', 'type': 'bridge'}, 'bridge': {'id': 99, 'interfaces': [{'id': 'eth1.99'}]},
+         'addresses': [{'cidr': '10.0.99.1/24', 'type': 'static', 'version': 'v4'}],
+         'status': {'comment': 'LAN', 'enabled': True}},
+    ],
+    'services': {'dhcpServers': [{
+        'enabled': True, 'ipVersion': 'v4', 'gatewayAddress': '10.0.99.1', 'ipv4Netmask': 24,
+        'dnsServers': ['10.0.99.1'],
+        'leaseTime': 86400, 'name': 'net_TEST99_br99_10-0-99-0-24', 'rangeStart': '10.0.99.100',
+        'rangeStop': '10.0.99.200', 'interfaces': [{'id': 'br99'}]}]},
+    'firewall/sets': [
+        {'identification': {'name': 'local_network', 'type': 'address'}, 'entries': ['10.0.99.0/24', '10.0.0.0/24']},
+        {'identification': {'name': 'isolated_subnets', 'type': 'address'}, 'entries': ['10.0.99.0/24']},
+    ],
+}}
+
+
+def test_vlan_network_from_captured_system_cfg():
+    # br0 is the untagged LAN and br40 a VLAN-only network: neither is created
+    assert intent_from_system_cfg(VLAN_CFG).networks == [
+        Network(99, 'TEST99', '10.0.99.1/24', isolated=True, others=['10.0.0.0/24'])]
+
+
+def test_new_network_is_built_in_order():
+    api = FakeOPNsense()
+    Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
+    assert api.paths() == [
+        '/api/interfaces/vlan_settings/add_item',
+        '/api/interfaces/vlan_settings/reconfigure',
+        '/api/interfaces/assignment/add_item',
+        '/api/interfaces/assignment/reconfigure',
+        '/api/kea/dhcpv4/set',
+        '/api/kea/dhcpv4/add_subnet',
+        '/api/firewall/filter/add_rule',
+        '/api/kea/service/reconfigure',
+        '/api/firewall/filter/apply',
+    ]
+    posts = dict(api.posts)
+    assert posts['/api/interfaces/vlan_settings/add_item']['vlan']['if'] == 'vtnet1'
+    assert posts['/api/interfaces/assignment/add_item']['interface'] == {
+        'if': 'vlan0.99', 'descr': 'TEST99', 'enable': '1', 'type4': 'staticv4', 'ipaddr': '10.0.99.1/24'}
+    assert posts['/api/kea/dhcpv4/set'] == {'dhcpv4': {'general': {'interfaces': 'lan,opt1'}}}
+    subnet = posts['/api/kea/dhcpv4/add_subnet']['subnet4']
+    assert subnet['pools'] == '10.0.99.100 - 10.0.99.200'
+    assert subnet['option_data'] == {'routers': '10.0.99.1', 'domain_name_servers': '10.0.99.1'}
+    rule = posts['/api/firewall/filter/add_rule']['rule']
+    # isolated: everything but the other local networks
+    assert (rule['interface'], rule['source_net'], rule['destination_net'], rule['destination_not']) == (
+        'opt1', 'opt1', '10.0.0.0/24', '1')
+
+
+def test_built_network_changes_nothing():
+    api = FakeOPNsense()
+    Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
+    api.subnets.append({'uuid': 'sub-new', 'subnet': '10.0.99.0/24', 'pools': '10.0.99.100 - 10.0.99.200',
+                        'valid_lifetime': '86400', 'description': OWNER_TAG + ' TEST99',
+                        'option_data.routers': '10.0.99.1', 'option_data.domain_name_servers': '10.0.99.1'})
+    api.kea_interfaces = ['lan', 'opt1']
+    api.rules = [dict(dict(api.posts)['/api/firewall/filter/add_rule']['rule'], uuid='f1')]
+    api.posts = []
+    assert Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG)) == []
+
+
+def test_plan_mode_plans_a_new_network_without_posting():
+    api = FakeOPNsense()
+    changes = Reconciler(api, 'plan').run(intent_from_system_cfg(VLAN_CFG))
+    assert len(changes) == 4      # VLAN, interface, Kea subnet, and rule
+    assert api.posts == []
+
+
+def test_turning_isolation_off_updates_the_rule():
+    api = FakeOPNsense()
+    Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
+    api.rules = [dict(dict(api.posts)['/api/firewall/filter/add_rule']['rule'], uuid='f1')]
+    api.posts = []
+    network = Network(99, 'TEST99', '10.0.99.1/24', others=['10.0.0.0/24'])
+    Reconciler(api, 'apply').run(Intent(networks=[network]))
+    rule = dict(api.posts)['/api/firewall/filter/set_rule/f1']['rule']
+    assert (rule['destination_net'], rule['destination_not']) == ('any', '0')
+
+
+def test_removed_network_is_taken_apart_after_its_users():
+    api = FakeOPNsense()
+    api.vlans = [{'uuid': 'v99', 'if': 'vtnet1', 'tag': '99', 'vlanif': 'vlan0.99 [TEST99]', 'descr': OWNER_TAG + ' TEST99'},
+                 {'uuid': 'v7', 'if': 'vtnet1', 'tag': '7', 'vlanif': 'vlan0.7', 'descr': 'hand made'}]
+    api.assigned.append({'uuid': 'opt1', 'identifier': 'opt1', 'if': 'vlan0.99', 'ipaddr': '10.0.99.1/24', 'enable': '1'})
+    api.kea_interfaces = ['lan', 'opt1']
+    api.subnets.append({'uuid': 'sub-99', 'subnet': '10.0.99.0/24', 'description': OWNER_TAG + ' TEST99'})
+    api.reservations = [reservation('aa:aa:aa:aa:aa:99', '10.0.99.5', OWNER_TAG)]
+    api.reservations[0]['subnet'] = 'sub-99'
+    api.rules = [{'uuid': 'f1', 'description': OWNER_TAG + ' VLAN 99: TEST99'},
+                 {'uuid': 'f2', 'description': 'hand made'}]
+    Reconciler(api, 'apply').run(Intent())
+    assert api.paths() == [
+        '/api/kea/dhcpv4/set',
+        '/api/kea/dhcpv4/del_reservation/r-10.0.99.5',
+        '/api/kea/dhcpv4/del_subnet/sub-99',
+        '/api/firewall/filter/del_rule/f1',
+        '/api/kea/service/reconfigure',
+        '/api/firewall/filter/apply',
+        '/api/interfaces/assignment/del_item/opt1',
+        '/api/interfaces/assignment/reconfigure',
+        '/api/interfaces/vlan_settings/del_item/v99',
+        '/api/interfaces/vlan_settings/reconfigure',
+    ]
+    assert dict(api.posts)['/api/kea/dhcpv4/set'] == {'dhcpv4': {'general': {'interfaces': 'lan'}}}
+
+
+def test_hand_made_vlan_is_used_and_kept():
+    api = FakeOPNsense()
+    api.vlans = [{'uuid': 'v99', 'if': 'vtnet1', 'tag': '99', 'vlanif': 'vlan0.99', 'descr': 'mine'}]
+    Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
+    assert '/api/interfaces/vlan_settings/add_item' not in api.paths()
+    assert not any('vlan_settings/set_item' in path for path in api.paths())
+    assert dict(api.posts)['/api/interfaces/assignment/add_item']['interface']['if'] == 'vlan0.99'

@@ -131,12 +131,14 @@ With `[apply] mode = apply` the daemon also works in the other direction. The co
 
 | Set in UniFi | Changes in OPNsense |
 |---|---|
+| A network with a VLAN ID and a gateway IP | a VLAN on the LAN NIC, an interface with the gateway address, a Kea subnet, and a rule passing its traffic |
+| Isolate network | that rule leaves out the other local networks |
 | A network's DHCP range and lease time | the Kea subnet's pool and lease time |
 | Fixed IP on a client | a Kea reservation for its MAC |
 | Port forwarding rules | Destination NAT rules, each passing its own traffic |
 | DNS records (A and AAAA) | Unbound host overrides |
 
-The daemon only deletes what it created. Its objects have descriptions starting with `[unifi]`. Anything made by hand stays, though a hand-made reservation or host override is updated if UniFi asks for a different address for the same MAC or name. UPnP isn't applied, because the OPNsense UPnP plugin has no API. Kea subnets are never created, so set up a network's subnet in OPNsense first. `mode = plan` logs what would change without changing anything, which is the safe way to try it.
+The daemon only deletes what it created. Its objects have descriptions starting with `[unifi]`. Anything made by hand stays, though a hand-made reservation or host override is updated if UniFi asks for a different address for the same MAC or name. UPnP isn't applied, because the OPNsense UPnP plugin has no API. A Kea subnet is only created for a VLAN network the daemon built, so the LAN's own subnet has to exist in OPNsense already. VLAN-only networks are left alone, because the gateway doesn't route them. As in UniFi, an isolated network can't start connections to the other local networks, but they can still reach it. Switch ports and Wi-Fi networks carry the VLAN as UniFi configures them, and the Proxmox bridge to the router has to pass tagged frames (a bridge without VLAN awareness does). NetFlow only captures the LAN, so clients on VLANs have no per-client traffic yet. `mode = plan` logs what would change without changing anything, which is the safe way to try it.
 
 Before turning it on, make the network in UniFi match OPNsense (subnet, DHCP range, lease time), or the first push changes OPNsense to UniFi's values. Adoption already copies the subnet and range.
 

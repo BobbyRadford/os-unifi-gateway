@@ -5,8 +5,13 @@ The controller sends its whole configuration for the gateway as `system_cfg`
 supports out of it, and `Reconciler` changes OPNsense through its REST API
 until it matches:
 
-- DHCP (Kea): each subnet's address pool and lease time, and its
-  reservations ("Fixed IP" on a client in the UniFi UI), matched by MAC.
+- Networks with a VLAN ID and a gateway address: a VLAN on the LAN port, an
+  interface with the gateway address, a Kea subnet that Kea listens on, and
+  a rule passing the network's traffic. An isolated network's rule leaves
+  out the other local networks, as UniFi's isolation does: it can't start
+  connections to them, but they can still reach it.
+- DHCP (Kea): each subnet's address pool and lease time (and, for the
+  networks above, its router and DNS server), and its reservations ("Fixed IP" on a client in the UniFi UI), matched by MAC.
 - Port forwards (Destination NAT), each with its own pass rule.
 - DNS records from the UI's DNS page (A and AAAA), as Unbound host overrides.
 
@@ -14,19 +19,23 @@ UniFi is the source of truth for everything listed above, but the reconciler
 only ever deletes objects it created itself. It marks them by starting their
 description with OWNER_TAG. Objects someone made by hand in OPNsense are
 updated when UniFi asks for something different (a reservation for the same
-MAC, say) but are never removed. Kea subnets that don't exist yet are skipped,
-not created.
+MAC, say) but are never removed. A Kea subnet is only created for a network
+the reconciler made, so the LAN's subnet has to exist already.
 
 Set `[apply] mode` in the config file: `off` (default) does nothing, `plan`
 only logs what it would change, and `apply` changes OPNsense.
 """
 import ipaddress
 import logging
+import re
 from dataclasses import dataclass, field
 
 logger = logging.getLogger('unifi-gateway')
 
 OWNER_TAG = '[unifi]'
+
+# The UXG port the LAN runs on. Its VLANs become VLANs on OPNsense's LAN NIC.
+LAN_PORT = 'eth1'
 MODES = ('off', 'plan', 'apply')
 
 # UniFi port forward protocols, as OPNsense names them
@@ -42,6 +51,7 @@ class DhcpScope:
     range_stop: str
     lease_time: int
     reservations: dict = field(default_factory=dict)   # {mac: ip}
+    dns_servers: list = field(default_factory=list)
 
 
 @dataclass
@@ -55,7 +65,22 @@ class PortForward:
 
 
 @dataclass
+class Network:
+    """A routed VLAN network on the LAN port."""
+    vlan: int
+    name: str
+    address: str                        # the gateway's address: "10.0.40.1/24"
+    isolated: bool = False
+    others: list = field(default_factory=list)          # the other local subnets
+
+    @property
+    def subnet(self):
+        return str(ipaddress.ip_interface(self.address).network)
+
+
+@dataclass
 class Intent:
+    networks: list = field(default_factory=list)
     dhcp: list = field(default_factory=list)
     port_forwards: list = field(default_factory=list)
     dns_records: dict = field(default_factory=dict)    # {(fqdn, 'A'|'AAAA'): address}
@@ -64,7 +89,7 @@ class Intent:
 def intent_from_system_cfg(cfg):
     """Read the supported parts of a UDAPI system_cfg."""
     udapi = cfg.get('udapi', cfg)
-    intent = Intent()
+    intent = Intent(networks=_networks_from(udapi))
 
     for server in udapi.get('services', {}).get('dhcpServers', []):
         if not server.get('enabled') or server.get('ipVersion', 'v4') != 'v4':
@@ -86,6 +111,7 @@ def intent_from_system_cfg(cfg):
             range_stop=server['rangeStop'],
             lease_time=int(server.get('leaseTime', 86400)),
             reservations=reservations,
+            dns_servers=list(server.get('dnsServers') or []),
         ))
 
     prefix = 'PortForward DNAT ['
@@ -124,6 +150,47 @@ def intent_from_system_cfg(cfg):
     return intent
 
 
+def _networks_from(udapi):
+    """A UXG carries each VLAN network on a bridge (br40) over a VLAN
+    interface on the LAN port (eth1.40). VLAN-only networks have no address
+    and are left alone, since the gateway doesn't route them."""
+    interfaces = udapi.get('interfaces', [])
+    tags = {}
+    for iface in interfaces:
+        vlan = iface.get('vlan') or {}
+        if (iface.get('identification', {}).get('type') == 'vlan'
+                and (vlan.get('interface') or {}).get('id') == LAN_PORT):
+            tags[iface['identification']['id']] = vlan['id']
+
+    # the network's name is only in its DHCP server's: net_IoT_br40_10-0-40-0-24
+    names = {}
+    for server in udapi.get('services', {}).get('dhcpServers', []):
+        match = re.match(r'net_(.+)_(br\d+)_', server.get('name') or '')
+        if match:
+            names[match.group(2)] = match.group(1)
+    sets = {s.get('identification', {}).get('name'): s.get('entries') or []
+            for s in udapi.get('firewall/sets', [])}
+
+    networks = []
+    for iface in interfaces:
+        ident = iface.get('identification', {})
+        if ident.get('type') != 'bridge':
+            continue
+        members = [tags[m['id']] for m in (iface.get('bridge') or {}).get('interfaces', [])
+                   if m.get('id') in tags]
+        address = next((a['cidr'] for a in iface.get('addresses') or []
+                        if a.get('version') == 'v4' and a.get('type') == 'static' and a.get('cidr')),
+                       None)
+        if len(members) != 1 or not address:
+            continue
+        network = Network(vlan=int(members[0]), address=address,
+                          name=names.get(ident['id']) or 'VLAN%s' % members[0])
+        network.isolated = network.subnet in sets.get('isolated_subnets', [])
+        network.others = sorted(n for n in sets.get('local_network', []) if n != network.subnet)
+        networks.append(network)
+    return sorted(networks, key=lambda n: n.vlan)
+
+
 # ── Making OPNsense match ────────────────────────────────────────────────
 
 def _owned(description):
@@ -147,16 +214,23 @@ class Reconciler:
         if self.mode == 'off':
             return []
         changes = []
-        kea = self._kea(intent.dhcp, changes)
+        # new networks first and old ones last, so nothing is removed while
+        # a Kea subnet or rule still refers to it
+        ifaces, removals = self._networks(intent.networks, changes)
+        kea = self._kea(intent.dhcp, intent.networks, ifaces, removals, changes)
+        rules = self._rules(intent.networks, ifaces, changes)
         nat = self._port_forwards(intent.port_forwards, changes)
         dns = self._dns_records(intent.dns_records, changes)
         if self.mode == 'apply':
             if kea:
                 self._post('/api/kea/service/reconfigure')
+            if rules:
+                self._post('/api/firewall/filter/apply')
             if nat:
                 self._post('/api/firewall/d_nat/apply')
             if dns:
                 self._post('/api/unbound/service/reconfigure')
+        self._remove_networks(removals, changes)
         for text in changes:
             logger.info('%s: %s', 'Applied' if self.mode == 'apply' else 'Would apply', text)
         if not changes:
@@ -171,12 +245,132 @@ class Reconciler:
             raise RuntimeError('%s failed: %s' % (path, response.get('validations')))
         return response
 
+    # VLANs and interfaces
+
+    def _networks(self, networks, changes):
+        """Creates and updates the VLAN and interface of each network. Returns
+        the interface of each VLAN ({40: 'opt1'}, None for one only planned)
+        and the owned VLANs UniFi no longer has, as (vlan row, interface row)."""
+        assigned = self.api.get('/api/interfaces/assignment/search_item').get('rows', [])
+        lan = next((row for row in assigned if row.get('identifier') == 'lan'), None)
+        if not lan:
+            return {}, []
+        vlan_rows = [row for row in self.api.get('/api/interfaces/vlan_settings/search_item').get('rows', [])
+                     if row.get('if') == lan['if']]
+        by_tag = {int(row['tag']): row for row in vlan_rows}
+
+        added = False
+        for network in networks:
+            if network.vlan not in by_tag:
+                changes.append('VLAN %d (%s) on %s: add' % (network.vlan, network.name, lan['if']))
+                self._post('/api/interfaces/vlan_settings/add_item', {'vlan': {
+                    'if': lan['if'], 'tag': str(network.vlan), 'pcp': '0',
+                    'descr': '%s %s' % (OWNER_TAG, network.name)}})
+                added = True
+            elif (_owned(by_tag[network.vlan].get('descr'))
+                    and by_tag[network.vlan]['descr'] != '%s %s' % (OWNER_TAG, network.name)):
+                changes.append('VLAN %d: rename to %s' % (network.vlan, network.name))
+                self._post('/api/interfaces/vlan_settings/set_item/' + by_tag[network.vlan]['uuid'],
+                           {'vlan': {'descr': '%s %s' % (OWNER_TAG, network.name)}})
+        if added and self.mode == 'apply':
+            self._post('/api/interfaces/vlan_settings/reconfigure')
+            vlan_rows = [row for row in self.api.get('/api/interfaces/vlan_settings/search_item').get('rows', [])
+                         if row.get('if') == lan['if']]
+            by_tag = {int(row['tag']): row for row in vlan_rows}
+
+        # once assigned, a VLAN's device reads "vlan01 [IoT]"
+        def device(vlan):
+            return (by_tag.get(vlan, {}).get('vlanif') or '').split(' ')[0] or None
+
+        by_device = {row.get('if'): row for row in assigned}
+        changed = False
+        for network in networks:
+            device_name = device(network.vlan)
+            current = by_device.get(device_name) if device_name else None
+            descr = re.sub(r'[^A-Za-z0-9_]', '_', network.name)[:32]
+            if current is None:
+                changes.append('Interface %s on VLAN %d: add' % (network.address, network.vlan))
+                self._post('/api/interfaces/assignment/add_item', {'interface': {
+                    'if': device_name or '', 'descr': descr, 'enable': '1',
+                    'type4': 'staticv4', 'ipaddr': network.address}})
+                changed = True
+            elif current.get('ipaddr') != network.address or current.get('enable') != '1':
+                changes.append('Interface %s: %s -> %s' % (current['identifier'], current.get('ipaddr'),
+                                                            network.address))
+                self._post('/api/interfaces/assignment/set_item/' + current['uuid'],
+                           {'interface': {'ipaddr': network.address, 'enable': '1'}})
+                changed = True
+        if changed and self.mode == 'apply':
+            self._post('/api/interfaces/assignment/reconfigure')
+            assigned = self.api.get('/api/interfaces/assignment/search_item').get('rows', [])
+            by_device = {row.get('if'): row for row in assigned}
+
+        ifaces = {}
+        for network in networks:
+            row = by_device.get(device(network.vlan))
+            ifaces[network.vlan] = row['identifier'] if row else None
+        wanted = {network.vlan for network in networks}
+        removals = [(row, by_device.get(device(tag))) for tag, row in sorted(by_tag.items())
+                    if tag not in wanted and _owned(row.get('descr'))]
+        return ifaces, removals
+
+    def _remove_networks(self, removals, changes):
+        for vlan, iface in removals:
+            if iface:
+                changes.append('Interface %s on VLAN %s: remove' % (iface['identifier'], vlan['tag']))
+                self._post('/api/interfaces/assignment/del_item/' + iface['uuid'])
+        if any(iface for _, iface in removals):
+            self._post('/api/interfaces/assignment/reconfigure')
+        for vlan, _ in removals:
+            changes.append('VLAN %s (%s): remove' % (vlan['tag'], vlan['descr'][len(OWNER_TAG):].strip()))
+            self._post('/api/interfaces/vlan_settings/del_item/' + vlan['uuid'])
+        if removals:
+            self._post('/api/interfaces/vlan_settings/reconfigure')
+
+    # Firewall rules for networks
+
+    @staticmethod
+    def _rule(network, iface):
+        return {
+            'enabled': '1', 'action': 'pass', 'quick': '1', 'direction': 'in',
+            'interface': iface, 'ipprotocol': 'inet', 'source_net': iface,
+            'destination_net': ','.join(network.others) if network.isolated and network.others else 'any',
+            'destination_not': '1' if network.isolated and network.others else '0',
+            'description': '%s VLAN %d: %s%s' % (OWNER_TAG, network.vlan, network.name,
+                                                ' (isolated)' if network.isolated else ''),
+        }
+
+    def _rules(self, networks, ifaces, changes):
+        before = len(changes)
+        owned = {}
+        for row in self.api.get('/api/firewall/filter/search_rule').get('rows', []):
+            match = re.match(re.escape(OWNER_TAG) + r' VLAN (\d+):', row.get('description') or '')
+            if match:
+                owned[int(match.group(1))] = row
+        for network in networks:
+            want = self._rule(network, ifaces.get(network.vlan) or '')
+            current = owned.get(network.vlan)
+            if current is None:
+                changes.append('Rule %r: add' % want['description'])
+                self._post('/api/firewall/filter/add_rule', {'rule': want})
+            elif any(current.get(key) != want[key] for key in
+                     ('description', 'source_net', 'destination_net', 'destination_not')):
+                changes.append('Rule %r: update' % want['description'])
+                self._post('/api/firewall/filter/set_rule/' + current['uuid'], {'rule': want})
+        wanted = {network.vlan for network in networks}
+        for vlan, current in sorted(owned.items()):
+            if vlan not in wanted:
+                changes.append('Rule %r: remove' % current['description'])
+                self._post('/api/firewall/filter/del_rule/' + current['uuid'])
+        return len(changes) > before
+
     # Kea DHCPv4
 
-    def _kea(self, scopes, changes):
-        if not scopes:
-            return False
+    def _kea(self, scopes, networks, ifaces, removals, changes):
         before = len(changes)
+        managed = {network.subnet: network for network in networks}
+        if not scopes and not managed and not removals:
+            return False
         subnets = {row['subnet']: row for row in
                    self.api.get('/api/kea/dhcpv4/search_subnet').get('rows', [])}
         reservations = self.api.get('/api/kea/dhcpv4/search_reservation').get('rows', [])
@@ -184,8 +378,48 @@ class Reconciler:
         general = self.api.get('/api/kea/dhcpv4/get').get('dhcpv4', {}).get('general', {})
         default_lease = str(general.get('valid_lifetime') or '')
 
+        # Kea only serves the interfaces it listens on
+        listening = general.get('interfaces') or {}
+        if isinstance(listening, dict):
+            listening = [key for key, value in listening.items() if value.get('selected')]
+        elif isinstance(listening, str):
+            listening = [i for i in listening.split(',') if i]
+        serving = [ifaces.get(managed[scope.subnet].vlan) for scope in scopes if scope.subnet in managed]
+        serving = [iface for iface in serving if iface]
+        # drop removed networks and managed ones whose DHCP is off
+        drop = {iface['identifier'] for _, iface in removals if iface}
+        drop |= {iface for iface in ifaces.values() if iface and iface not in serving}
+        want = [i for i in listening if i not in drop]
+        want += [i for i in serving if i not in want]
+        if want != list(listening):
+            changes.append('Kea interfaces: %s -> %s' % (','.join(listening), ','.join(want)))
+            self._post('/api/kea/dhcpv4/set', {'dhcpv4': {'general': {'interfaces': ','.join(want)}}})
+
         for scope in scopes:
             subnet = subnets.get(scope.subnet)
+            # Kea's autocollect doesn't fill in a subnet made through the
+            # API, so the reconciler sets the options of its own subnets
+            options = {}
+            if scope.subnet in managed:
+                gateway = str(ipaddress.ip_interface(managed[scope.subnet].address).ip)
+                options = {'routers': gateway,
+                           'domain_name_servers': ','.join(scope.dns_servers) or gateway}
+            if not subnet and scope.subnet in managed:
+                name = managed[scope.subnet].name
+                changes.append('Kea subnet %s (%s): add' % (scope.subnet, name))
+                result = self._post('/api/kea/dhcpv4/add_subnet', {'subnet4': {
+                    'subnet': scope.subnet,
+                    'pools': '%s - %s' % (scope.range_start, scope.range_stop),
+                    'valid_lifetime': str(scope.lease_time),
+                    'option_data_autocollect': '0',
+                    'option_data': options,
+                    'description': '%s %s' % (OWNER_TAG, name)}})
+                if not result.get('uuid'):
+                    continue        # only planned: its reservations come once it exists
+                subnet = {'uuid': result['uuid'], 'subnet': scope.subnet, 'valid_lifetime': str(scope.lease_time),
+                          'pools': '%s - %s' % (scope.range_start, scope.range_stop),
+                          'option_data.routers': options['routers'],
+                          'option_data.domain_name_servers': options['domain_name_servers']}
             if not subnet:
                 logger.warning('No Kea subnet for %s: create it in OPNsense first', scope.subnet)
                 continue
@@ -197,6 +431,9 @@ class Reconciler:
                 update['pools'] = pool
             if str(subnet.get('valid_lifetime') or default_lease) != str(scope.lease_time):
                 update['valid_lifetime'] = str(scope.lease_time)
+            if any(subnet.get('option_data.' + key) != value for key, value in options.items()):
+                update['option_data_autocollect'] = '0'
+                update['option_data'] = options
             if update:
                 changes.append('Kea subnet %s: set %s' % (scope.subnet, update))
                 self._post('/api/kea/dhcpv4/set_subnet/' + uuid, {'subnet4': update})
@@ -222,6 +459,17 @@ class Reconciler:
                 if mac not in scope.reservations and _owned(current.get('description')):
                     changes.append('Kea reservation %s -> %s: remove' % (mac, current.get('ip_address')))
                     self._post('/api/kea/dhcpv4/del_reservation/' + current['uuid'])
+
+        wanted = {scope.subnet for scope in scopes}
+        for cidr, subnet in sorted(subnets.items()):
+            if cidr not in wanted and _owned(subnet.get('description')):
+                for reservation in reservations:
+                    if reservation.get('subnet') == subnet['uuid']:
+                        changes.append('Kea reservation %s -> %s: remove' % (
+                            reservation.get('hw_address'), reservation.get('ip_address')))
+                        self._post('/api/kea/dhcpv4/del_reservation/' + reservation['uuid'])
+                changes.append('Kea subnet %s: remove' % cidr)
+                self._post('/api/kea/dhcpv4/del_subnet/' + subnet['uuid'])
         return len(changes) > before
 
     # Destination NAT
