@@ -759,6 +759,15 @@ def test_firewall_rules_from_the_ui():
     ]
 
 
+def test_firewall_rules_without_logging_have_no_tag():
+    cfg = copy.deepcopy(FIREWALL_CFG)
+    for chain in cfg['udapi']['firewall/filter']:
+        for rule in chain['rules']:
+            if (rule.get('triggerTag') or {}).get('type') == 'FIREWALL_RULE':
+                del rule['triggerTag']
+    assert [r.index for r in intent_from_system_cfg(cfg).firewall_rules] == [20000, 20005, 20000]
+
+
 def test_firewall_rules_go_ahead_of_network_rules_with_aliases_for_lists():
     api = FakeOPNsense()
     rules = intent_from_system_cfg(FIREWALL_CFG).firewall_rules

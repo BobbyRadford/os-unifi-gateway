@@ -353,8 +353,9 @@ def _app_blocks(udapi):
 def _firewall_rules(udapi):
     """The rules from the UI's firewall rule lists. The controller puts them
     in the chain of their rule set (LAN_IN), among its own rules, with
-    their rule index as their ID (from 20000) and a FIREWALL_RULE trigger
-    tag. A rule that can't be matched in OPNsense is skipped with a
+    their rule index as their ID (20000-29999, or 40000-49999 for rules
+    after the predefined ones). Rules that log also carry a FIREWALL_RULE
+    trigger tag. The controller's own rules use other IDs. A rule that can't be matched in OPNsense is skipped with a
     warning, rather than applied as something wider."""
     sets = {s['identification']['name']: s for s in udapi.get('firewall/sets', [])}
     # a network as a source or destination is a set the gateway makes
@@ -375,7 +376,8 @@ def _firewall_rules(udapi):
         name = (chain.get('config') or {}).get('name')
         for rule in chain.get('rules', []):
             tag = (rule.get('triggerTag') or {}).get('type')
-            if tag != 'FIREWALL_RULE':
+            index = rule.get('id', 0)
+            if not (tag == 'FIREWALL_RULE' or (tag is None and index // 10000 in (2, 4))):
                 continue
             label = '%s rule %s (%s)' % (name, rule.get('id'), rule.get('description', ''))
             if name not in FIREWALL_CHAINS:
