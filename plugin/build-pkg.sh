@@ -30,10 +30,10 @@ cp -R "$PLUGIN_DIR/src/." "$STAGE$PREFIX/"
 chmod 755 "$STAGE$PREFIX/etc/rc.d/unifi_gateway"
 
 mkdir -p "$STAGE$APP_DIR/collectors"
-for f in unifi_gateway.py unifi_protocol.py aes.py devices.py isp.py pingtest.py speedtest.py tools.py tlv.py provision.py reconcile.py; do
+for f in unifi_gateway.py unifi_protocol.py aes.py devices.py isp.py pingtest.py speedtest.py tools.py tlv.py provision.py reconcile.py app_domains.json; do
     cp "$ROOT_DIR/$f" "$STAGE$APP_DIR/"
 done
-cp "$ROOT_DIR"/collectors/*.py "$STAGE$APP_DIR/collectors/"
+cp "$ROOT_DIR"/collectors/*.py "$ROOT_DIR"/collectors/*.json "$STAGE$APP_DIR/collectors/"
 cp "$ROOT_DIR/LICENSE" "$STAGE$APP_DIR/"
 
 # What System > Firmware > Plugins shows for an installed plugin

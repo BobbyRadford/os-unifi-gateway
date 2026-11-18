@@ -25,7 +25,7 @@ STORAGE=${STORAGE:-local-lvm}
 BRIDGE=${BRIDGE:-vmbr0}
 IP=${IP:-dhcp}
 REPO=${REPO:-https://github.com/BobbyRadford/os-unifi-gateway.git}
-BRANCH=${BRANCH:-bobby/opnsense-apply}
+BRANCH=${BRANCH:-master}
 APPLY_MODE=${APPLY_MODE:-plan}
 STATE=/var/lib/opnsense-unifi
 

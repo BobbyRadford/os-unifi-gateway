@@ -150,7 +150,7 @@ class APISource(Source):
         if digest:
             query['digest'] = digest
         return self._get('/api/diagnostics/firewall/log?' + urllib.parse.urlencode(query),
-                         'Firewall: Log Files: Live View') or []
+                         'Diagnostics: Logs: Firewall: Live View') or []
 
     def ping(self, destination, count, interval, packet_size):
         return APIPing(self, destination, count, interval, packet_size)
