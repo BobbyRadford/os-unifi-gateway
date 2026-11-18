@@ -12,6 +12,7 @@ import re
 import time
 
 from .source import LEASE_SERVERS, SourceError
+from .traffic import TRAFFIC_INTERVAL, StateCounter
 
 logger = logging.getLogger('unifi-gateway')
 
@@ -22,9 +23,6 @@ FORBIDDEN_BACKOFF = 600
 
 # How long a client's DNS name holds against the other PTR records of its address
 RDNS_HOLD = 900
-
-# How long after a 5-minute Insight bucket closes before its traffic is counted
-FLOW_SETTLE = 600
 
 
 def parse_uptime(text):
@@ -185,8 +183,7 @@ class OPNsenseCollector:
         self._failed = set()
         self._prev_io = {}
         self._lease_server = None
-        self._flow_until = None
-        self._flow_totals = {}
+        self._traffic = StateCounter()
         self._wan_dns = []
         self._upstream_dns = []
         self._links = {}
@@ -238,9 +235,13 @@ class OPNsenseCollector:
         if self._due('nameservers', 300):
             self._upstream_dns = self._get_upstream_dns()
         self.data['nameservers'] = self._upstream_dns or self._wan_dns
+        if self._due('traffic', TRAFFIC_INTERVAL):
+            states = self._call('states')
+            if states is not None:
+                self._traffic.update(states)
         if self._due('host_table', 60):
-            self._update_client_traffic()
             self.data['host_table'] = self._build_host_table()
+        self._update_traffic()
 
         self.updated['general'] = time.time()
 
@@ -683,44 +684,11 @@ class OPNsenseCollector:
 
     # ── Clients ──────────────────────────────────────────────────────────
 
-    def _update_client_traffic(self):
-        """Accumulate per-client byte counters from Network Insight.
-
-        The FlowSourceAddrTotals aggregate counts each flow twice: once under
-        its source on the ingress interface (direction 'in') and once under
-        its destination on the egress interface (direction 'out'). On the LAN
-        side those are a client's upload and download, on the LAN NIC and on
-        each VLAN over it. Each 5-minute bucket is
-        queried once, so nothing is counted twice.
-
-        NetFlow exports a long connection only every activeTimeout seconds,
-        and Insight then spreads its bytes back over the buckets it spanned.
-        A bucket is read FLOW_SETTLE seconds after it closes so those late
-        bytes are in it, which needs activeTimeout set well below that.
-        """
-        resolution = 300
-        until = (int(time.time()) - FLOW_SETTLE) // resolution * resolution
-        since = self._flow_until or until - resolution
-        if until <= since:
-            return
-
-        totals = {}
-        for device in self._lan_devices:
-            for direction, counter in (('in', 'tx_bytes'), ('out', 'rx_bytes')):
-                rows = self._call('flow_totals', since, until, device, direction)
-                if rows is None:
-                    return
-                for row in rows:
-                    addr = row.get('src_addr')
-                    if addr:
-                        entry = totals.setdefault(addr, {})
-                        entry[counter] = entry.get(counter, 0) + int(float(row.get('total') or 0))
-
-        for addr, counts in totals.items():
-            entry = self._flow_totals.setdefault(addr, {'rx_bytes': 0, 'tx_bytes': 0})
-            entry['rx_bytes'] += counts.get('rx_bytes', 0)
-            entry['tx_bytes'] += counts.get('tx_bytes', 0)
-        self._flow_until = until
+    def _update_traffic(self):
+        """Put the latest per-client totals in the host table, which is
+        rebuilt only once a minute."""
+        for entry in self.data.get('host_table', []):
+            entry.update(self._traffic.totals.get(entry['ip'], {}))
 
     def _build_host_table(self):
         """LAN clients from the ARP table, merged with DHCP leases."""
@@ -741,7 +709,6 @@ class OPNsenseCollector:
                 'uptime': client_uptime, 'rx_bytes': 0, 'tx_bytes': 0,
                 'rx_packets': 0, 'tx_packets': 0, 'bc_bytes': 0, 'mc_bytes': 0,
             }
-            entry.update(self._flow_totals.get(ip, {}))
             hosts[mac] = entry
 
         for row in rows:

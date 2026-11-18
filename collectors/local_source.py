@@ -22,6 +22,8 @@ PING = '/sbin/ping'
 CONFIG_XML = '/conf/config.xml'
 SYSCTL = '/sbin/sysctl'
 VERSION_CMD = '/usr/local/sbin/opnsense-version'
+# the script behind the 'filter list states' action, which lists every state without arguments
+LIST_STATES = '/usr/local/opnsense/scripts/filter/list_states.py'
 IFCTL_DIR = '/tmp'
 
 # FreeBSD ping's reply and summary lines (hlim for IPv6)
@@ -309,11 +311,12 @@ class LocalSource(Source):
     def unbound_infra(self):
         return self._action('unbound', 'dumpinfra')
 
-    def flow_totals(self, since, until, device, direction):
-        return self._action(
-            'netflow', 'aggregate', 'top', 'FlowSourceAddrTotals', str(int(since)),
-            str(int(until)), 'src_addr', 'octets',
-            'if=%s,direction=%s' % (device, direction), '1000')
+    def states(self):
+        output = self._run([LIST_STATES])
+        try:
+            return json.loads(output).get('details', [])
+        except ValueError:
+            raise SourceError('pf states', None, output[:200] or 'no output') from None
 
     def ping(self, destination, count, interval, packet_size):
         return LocalPing(destination, count, interval, packet_size)

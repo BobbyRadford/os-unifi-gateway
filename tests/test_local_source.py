@@ -102,11 +102,11 @@ class FakeRunner:
         self.calls.append(args)
         if args[0].endswith('configctl'):
             key = ' '.join(args[1:])
-            if key.startswith('netflow aggregate top'):
-                return json.dumps([{'src_addr': '192.168.48.2', 'total': 512}])
             if key not in self.actions:
                 return 'Action not found\n'
             return json.dumps(self.actions[key])
+        if args[0].endswith('list_states.py'):
+            return json.dumps({'details': [{'id': 'a', 'direction': 'in'}], 'total_entries': 1})
         if args[0].endswith('opnsense-version'):
             return 'OPNsense 25.7.5\n'
         if args[0].endswith('sysctl'):
@@ -261,11 +261,9 @@ def test_dhcp_subnets_from_config(local, tmp_path):
                                          {'subnet': '', 'pools': '10.1.0.2-10.1.0.9'}]
 
 
-def test_flow_totals_passes_filter(local):
-    assert local.flow_totals(2700, 3000, 'bridge0', 'in') == [{'src_addr': '192.168.48.2', 'total': 512}]
-    assert local.runner.calls[-1][1:] == [
-        'netflow', 'aggregate', 'top', 'FlowSourceAddrTotals', '2700', '3000',
-        'src_addr', 'octets', 'if=bridge0,direction=in', '1000']
+def test_states_lists_every_state(local):
+    assert local.states() == [{'id': 'a', 'direction': 'in'}]
+    assert local.runner.calls[-1] == ['/usr/local/opnsense/scripts/filter/list_states.py']
 
 
 def test_reverse_dns_skips_unresolved(local):

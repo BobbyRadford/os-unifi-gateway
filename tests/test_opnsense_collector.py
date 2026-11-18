@@ -620,37 +620,31 @@ class TestClients:
         assert sorted(calls[0].split('?')[1].split('&')) == [
             'address[]=10.8.1.1', 'address[]=192.168.48.2', 'address[]=192.168.48.9']
 
-    def test_client_traffic_accumulates(self, gateway_config, fake_api):
-        def top(path):
-            if path.endswith('bridge0,in'):
-                return [{'src_addr': '192.168.48.2', 'total': 100.0},
-                        {'src_addr': '', 'total': 100.0}]
-            return [{'src_addr': '192.168.48.2', 'total': 1000}]
-        fake_api.responses['/api/diagnostics/networkinsight/top/'] = top
+    @staticmethod
+    def states(*rows):
+        return {'rows': [{'id': id, 'direction': 'in', 'src_addr': src, 'dst_addr': '1.1.1.1',
+                          'bytes': [sent, received]} for id, src, sent, received in rows]}
 
-        with patch('collectors.opnsense.time.time', return_value=3600.0):
+    def test_client_traffic_from_states(self, gateway_config, fake_api):
+        path = '/api/diagnostics/firewall/query_states'
+        fake_api.responses[path] = self.states(('a', '192.168.48.2', 100, 1000))
+        with patch('collectors.opnsense.time.time', return_value=1000.0):
             dc = make(gateway_config, fake_api)
         host = [h for h in dc.data['host_table'] if h['ip'] == '192.168.48.2'][0]
-        assert (host['tx_bytes'], host['rx_bytes']) == (100, 1000)
-        flow_calls = [c for c in fake_api.calls if 'networkinsight' in c]
-        assert '/FlowSourceAddrTotals/2700/3000/' in flow_calls[0]
+        assert (host['tx_bytes'], host['rx_bytes']) == (0, 0)
 
-        # bucket 2700-3000 is read only once it has settled for 10 minutes
-        # same 5-minute bucket: nothing new is queried or added
-        dc.updated['host_table'] = 0
-        with patch('collectors.opnsense.time.time', return_value=3800.0):
-            dc.update()
-        assert len([c for c in fake_api.calls if 'networkinsight' in c]) == 2
-
-        # next bucket adds on top
-        dc.updated['host_table'] = 0
-        with patch('collectors.opnsense.time.time', return_value=3901.0):
+        # the next read 10 s later shows in the host table at once
+        fake_api.responses[path] = self.states(('a', '192.168.48.2', 150, 3000),
+                                                ('b', '192.168.48.2', 5, 6))
+        with patch('collectors.opnsense.time.time', return_value=1010.0):
             dc.update()
         host = [h for h in dc.data['host_table'] if h['ip'] == '192.168.48.2'][0]
-        assert (host['tx_bytes'], host['rx_bytes']) == (200, 2000)
-        flow_calls = [c for c in fake_api.calls if 'networkinsight' in c]
-        assert '/FlowSourceAddrTotals/3000/3300/' in flow_calls[-1]
+        assert (host['tx_bytes'], host['rx_bytes']) == (55, 2006)
 
+        # and is read no more often than that
+        with patch('collectors.opnsense.time.time', return_value=1015.0):
+            dc.update()
+        assert sum(path in c for c in fake_api.calls) == 2
 
     def test_vlan_clients_count_as_lan_clients(self, gateway_config, fake_api):
         # a VLAN on the LAN NIC shares its MAC
@@ -659,15 +653,15 @@ class TestClients:
         fake_api.responses['/api/diagnostics/interface/search_arp']['rows'].append(
             {'mac': '00:00:5e:00:53:40', 'ip': '10.0.40.5', 'intf': 'vlan01', 'expired': False,
              'hostname': '', 'intf_description': 'IoT'})
-        fake_api.responses['/api/diagnostics/networkinsight/top/'] = (
-            lambda path: [{'src_addr': '10.0.40.5', 'total': 40}] if 'vlan01' in path else [])
-        with patch('collectors.opnsense.time.time', return_value=3600.0):
+        path = '/api/diagnostics/firewall/query_states'
+        fake_api.responses[path] = self.states()
+        with patch('collectors.opnsense.time.time', return_value=1000.0):
             dc = make(gateway_config, fake_api)
+        fake_api.responses[path] = self.states(('a', '10.0.40.5', 40, 400))
+        with patch('collectors.opnsense.time.time', return_value=1010.0):
+            dc.update()
         host = [h for h in dc.data['host_table'] if h['ip'] == '10.0.40.5'][0]
-        assert (host['tx_bytes'], host['rx_bytes']) == (40, 40)
-        flows = [c for c in fake_api.calls if 'networkinsight' in c]
-        assert len(flows) == 4 and sum('vlan01' in c for c in flows) == 2
-
+        assert (host['tx_bytes'], host['rx_bytes']) == (40, 400)
 
 
 class TestLanConfig:
