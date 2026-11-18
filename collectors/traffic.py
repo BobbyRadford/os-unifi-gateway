@@ -15,11 +15,15 @@ leaves by with the same counts.
 Each poll also reports the states that are new or carried traffic as the
 inform's `connections`, which the controller keeps as Traffic Flows (the
 Flows tab, and the clients and destinations Insights ranks by flow count).
+`blocked_triggers` does the same for the packets the firewall blocked.
 """
 import ipaddress
+import re
 
 TRAFFIC_INTERVAL = 10
 PROTOCOLS = {'icmp': 1, 'tcp': 6, 'udp': 17, 'ipv6-icmp': 58}
+# Hostnames kept for destinations (StateCounter.hostnames) before starting over
+MAX_HOSTNAMES = 20000
 
 
 def _public_address(address):
@@ -40,6 +44,54 @@ def _client_address(address):
     return ip.version == 4 and ip.is_private
 
 
+def _ports(ip, sport, dport):
+    """Add the ports, given as text, to a connection's `ip`."""
+    for key, port in (('sport', sport), ('dport', dport)):
+        if str(port or '').isdigit():
+            ip[key] = int(port)
+    return ip
+
+
+def _regions(country, src, dst):
+    """{'src', 'dst'}: the country of each public end, for the controller's
+    ranking of destinations and regions."""
+    if not country:
+        return {}
+    regions = {end: country(address) for end, address in (('src', src), ('dst', dst))
+               if _public_address(address)}
+    return {end: iso for end, iso in regions.items() if iso}
+
+
+def blocked_triggers(rows, country=None):
+    """The inform's `triggers` for the packets the firewall blocked, from
+    `rows` of Source.firewall_log. A trigger names the firewall policy that
+    acted. The controller keeps one as a BLOCKED Traffic Flow when that
+    policy blocks, or, as here, when it doesn't know the policy. Its id has
+    to look like a MongoDB ObjectId, so it is the start of the OPNsense
+    rule's hash."""
+    triggers = []
+    for row in rows:
+        if row.get('action') != 'block' or not str(row.get('protonum') or '').isdigit():
+            continue
+        src, dst = row.get('src'), row.get('dst')
+        rule = str(row.get('rid') or '')
+        trigger = {
+            'id': rule[:24] if re.fullmatch(r'[0-9a-f]{24,}', rule) else '0' * 24,
+            'type': 'FIREWALL_POLICY',
+            'ip': _ports({'saddr': src, 'daddr': dst, 'protocol': int(row['protonum'])},
+                         row.get('srcport'), row.get('dstport')),
+            'stats': {'bytes': int(row['length']) if str(row.get('length') or '').isdigit() else 0,
+                      'packets': 1},
+        }
+        if row.get('__timestamp__'):
+            trigger['timestamp'] = row['__timestamp__']
+        region = _regions(country, src, dst)
+        if region:
+            trigger['region'] = region
+        triggers.append(trigger)
+    return triggers
+
+
 class StateCounter:
     """Totals per address, {address: {'tx_bytes', 'rx_bytes'}} as a client
     sees them: tx is what it sent. They start at zero when counting starts,
@@ -47,11 +99,15 @@ class StateCounter:
 
     With `country`, a function giving the ISO code of a public address,
     `countries` also holds each client's bytes per country of the far end:
-    {address: {iso: [tx, rx]}}."""
+    {address: {iso: [tx, rx]}}.
+
+    `hostnames` ({address: name}, filled by the caller) names the public
+    destinations of the connections reported."""
 
     def __init__(self, country=None):
         self.totals = {}
         self.countries = {}
+        self.hostnames = {}
         self._country = country
         self._last = None
         self._connections = []
@@ -103,10 +159,8 @@ class StateCounter:
         if protocol is None:
             return
         src, dst = row.get('src_addr'), row.get('dst_addr')
-        ip = {'saddr': src, 'daddr': dst, 'protocol': protocol}
-        for key, field in (('sport', 'src_port'), ('dport', 'dst_port')):
-            if str(row.get(field) or '').isdigit():
-                ip[key] = int(row[field])
+        ip = _ports({'saddr': src, 'daddr': dst, 'protocol': protocol},
+                    row.get('src_port'), row.get('dst_port'))
         try:
             sent_packets, received_packets = (int(n) for n in row.get('pkts') or ())
         except (TypeError, ValueError):
@@ -114,13 +168,11 @@ class StateCounter:
         connection = {'ip': ip, 'stats': {
             'txBytes': sent, 'rxBytes': received,
             'txPackets': sent_packets, 'rxPackets': received_packets}}
-        if self._country:
-            # the controller ranks destinations and regions by these
-            region = {end: self._country(address) for end, address in (('src', src), ('dst', dst))
-                      if _public_address(address)}
-            region = {end: iso for end, iso in region.items() if iso}
-            if region:
-                connection['region'] = region
+        region = _regions(self._country, src, dst)
+        if region:
+            connection['region'] = region
+        if _public_address(dst) and self.hostnames.get(dst):
+            connection['hostnames'] = [self.hostnames[dst]]
         self._connections.append(connection)
 
     def _add_country(self, client, remote, tx, rx):

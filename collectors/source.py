@@ -14,6 +14,8 @@ the same shapes from the configd actions the API controllers wrap.
 """
 
 LEASE_SERVERS = ('dnsmasq', 'kea', 'isc')
+# Firewall log entries read at most at once (Source.firewall_log)
+LOG_LIMIT = 1000
 
 
 class SourceError(Exception):
@@ -109,6 +111,13 @@ class Source:
         """Every pf state as rows of {id, direction ('in' or 'out'), src_addr,
         dst_addr, bytes: [sent by the source, sent to it]}, like
         /api/diagnostics/firewall/query_states."""
+        raise NotImplementedError
+
+    def firewall_log(self, digest=None):
+        """The firewall log's newest entries, newest first: at most
+        LOG_LIMIT, or only those after the entry with `digest`. Rows are like
+        /api/diagnostics/firewall/log's: {action, interface, dir, src, dst,
+        srcport, dstport, protonum, length, rid, __timestamp__, __digest__}."""
         raise NotImplementedError
 
     def ping(self, destination, count, interval, packet_size):

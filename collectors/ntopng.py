@@ -22,6 +22,9 @@ logger = logging.getLogger('unifi-gateway')
 
 APPS_INTERVAL = 60
 INTERFACES_INTERVAL = 300
+# Active flows read per request, and the most requests per interface
+FLOWS_PAGE = 1000
+MAX_FLOW_PAGES = 5
 UNKNOWN_APP = 0xFFFFFF
 
 with open(os.path.join(os.path.dirname(__file__), 'ndpi_apps.json')) as _f:
@@ -78,6 +81,23 @@ class Ntopng:
         # 404 for a host ntopng hasn't seen on that interface
         host = self._get('/lua/rest/v2/get/host/data.lua', missing={}, ifid=ifid, host=ip)
         return (host or {}).get('ndpi') or {}
+
+
+    def server_names(self, ifid):
+        """{address: name} for the servers in ntopng's active flows on an
+        interface. ntopng names hosts from the DNS answers it sees, so
+        servers whose lookup it missed are left out."""
+        names = {}
+        for page in range(1, MAX_FLOW_PAGES + 1):
+            flows = self._get('/lua/rest/v2/get/flow/active.lua', missing={}, ifid=ifid,
+                              perPage=FLOWS_PAGE, currentPage=page) or {}
+            for flow in flows.get('data') or []:
+                server = flow.get('server') or {}
+                if server.get('ip') and server.get('name') not in (None, '', server['ip']):
+                    names[server['ip']] = server['name']
+            if page * FLOWS_PAGE >= int(flows.get('totalRows') or 0):
+                break
+        return names
 
 
 class AppCounter:

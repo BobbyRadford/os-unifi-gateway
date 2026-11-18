@@ -15,7 +15,7 @@ import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, wait
 
-from .source import PingJob, Source, SourceError
+from .source import LOG_LIMIT, PingJob, Source, SourceError
 
 CONFIGCTL = '/usr/local/sbin/configctl'
 PING = '/sbin/ping'
@@ -317,6 +317,10 @@ class LocalSource(Source):
             return json.loads(output).get('details', [])
         except ValueError:
             raise SourceError('pf states', None, output[:200] or 'no output') from None
+
+    def firewall_log(self, digest=None):
+        # the action behind /api/diagnostics/firewall/log: limit, then digest
+        return self._action('filter', 'read', 'log', str(LOG_LIMIT), *([digest] if digest else []))
 
     def ping(self, destination, count, interval, packet_size):
         return LocalPing(destination, count, interval, packet_size)

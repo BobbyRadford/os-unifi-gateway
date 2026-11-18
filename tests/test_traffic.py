@@ -1,4 +1,4 @@
-from collectors.traffic import StateCounter
+from collectors.traffic import StateCounter, blocked_triggers
 
 
 def state(id, src, dst, sent, received, direction='in'):
@@ -94,3 +94,32 @@ def test_connections_are_states_that_are_new_or_carried_traffic():
     counter.update([flow_state('a', '10.0.0.5', 50000, '8.8.8.8', 443, 150, 9000),
                     flow_state('b', '10.0.0.5', 40000, '10.0.0.1', 53, 60, 120, proto='udp')])
     assert [c['stats']['rxBytes'] for c in counter.take_connections()] == [9000]
+
+
+def test_connections_name_public_destinations():
+    counter = StateCounter()
+    counter.hostnames.update({'8.8.8.8': 'dns.google', '10.0.0.1': 'router'})
+    counter.update([flow_state('a', '10.0.0.5', 1, '8.8.8.8', 53, 1, 1, proto='udp'),
+                    flow_state('b', '10.0.0.5', 2, '10.0.0.1', 53, 1, 1, proto='udp')])
+    assert [c.get('hostnames') for c in counter.take_connections()] == [['dns.google'], None]
+
+
+def test_blocked_triggers():
+    rows = [
+        {'action': 'block', 'protonum': '17', 'src': '8.8.8.8', 'dst': '10.0.0.1', 'srcport': '53',
+         'dstport': '5353', 'length': '80', 'rid': '02f4bab031b57d1e30553ce08e0ec131',
+         '__timestamp__': '2026-11-17T21:14:46-05:00'},
+        {'action': 'pass', 'protonum': '6', 'src': '10.0.0.5', 'dst': '8.8.8.8'},
+        # ICMP has no ports, and a rule without a hash still needs an id
+        {'action': 'block', 'protonum': '1', 'src': '10.0.40.5', 'dst': '10.0.0.5', 'rid': ''},
+        {'action': 'block', 'protonum': '', 'src': '10.0.0.5', 'dst': '10.0.0.6'},
+    ]
+    assert blocked_triggers(rows, {'8.8.8.8': 'US'}.get) == [
+        {'id': '02f4bab031b57d1e30553ce0', 'type': 'FIREWALL_POLICY',
+         'ip': {'saddr': '8.8.8.8', 'daddr': '10.0.0.1', 'protocol': 17, 'sport': 53, 'dport': 5353},
+         'stats': {'bytes': 80, 'packets': 1}, 'timestamp': '2026-11-17T21:14:46-05:00',
+         'region': {'src': 'US'}},
+        {'id': '0' * 24, 'type': 'FIREWALL_POLICY',
+         'ip': {'saddr': '10.0.40.5', 'daddr': '10.0.0.5', 'protocol': 1},
+         'stats': {'bytes': 0, 'packets': 1}},
+    ]

@@ -731,6 +731,9 @@ class FakeNtopng:
         self.calls.append((ifid, ip))
         return self.hosts.get(ip, {})
 
+    def server_names(self, ifid):
+        return {'8.8.8.8': 'dns.google'} if ifid == 2 else {}
+
 
 class TestAppTraffic:
     """dpi_stats from ntopng, per client on the interface it's on."""
@@ -757,3 +760,41 @@ class TestAppTraffic:
     def test_off_without_settings(self, gateway_config, fake_api):
         dc = make(gateway_config, fake_api)
         assert dc._ntopng is None and dc._geoip is None and 'dpi_stats' not in dc.data
+
+
+class TestFlows:
+    """Connections and blocked packets, for Traffic Flows."""
+
+    def test_names_destinations_and_reports_new_blocks(self, gateway_config, fake_api):
+        log = [{'action': 'block', 'protonum': '6', 'src': '8.8.8.8', 'dst': '203.0.113.2',
+                'srcport': '4000', 'dstport': '22', 'length': '60', 'rid': 'ab' * 16,
+                '__timestamp__': '2026-11-17T21:14:46-05:00', '__digest__': 'second'},
+               {'action': 'pass', 'protonum': '6', 'src': '10.0.0.5', 'dst': '8.8.8.8',
+                '__digest__': 'first'}]
+        reads = []
+
+        def firewall_log(path):
+            reads.append(path)
+            # the first read finds the end of the log, the next one what came after
+            return log[1:] if len(reads) == 1 else log[:1]
+
+        fake_api.responses['/api/diagnostics/firewall/log'] = firewall_log
+        fake_api.responses['/api/diagnostics/firewall/query_states'] = {'rows': [
+            {'id': 'a', 'direction': 'in', 'proto': 'tcp', 'src_addr': '10.0.0.5', 'src_port': '5000',
+             'dst_addr': '8.8.8.8', 'dst_port': '443', 'bytes': [10, 20], 'pkts': [1, 2]}]}
+        dc = make(gateway_config, fake_api)
+        assert dc.data['triggers'] == []
+        dc._ntopng = FakeNtopng({})
+        dc._client_devices = {'10.0.0.5': 'vtnet1'}
+        dc.updated['traffic'] = 0
+        dc.update()
+        assert 'digest=first' in reads[1]
+        assert [t['ip'] for t in dc.data['triggers']] == [
+            {'saddr': '8.8.8.8', 'daddr': '203.0.113.2', 'protocol': 6, 'sport': 4000, 'dport': 22}]
+        assert dc.data['triggers'][0]['id'] == 'ab' * 12
+        # the state didn't move, so it isn't reported again, but it was named
+        assert dc.data['connections'] == []
+        assert dc._traffic.hostnames == {'8.8.8.8': 'dns.google'}
+        # an inform between reads sends neither again
+        dc.update()
+        assert dc.data['triggers'] == [] and dc.data['connections'] == []

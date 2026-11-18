@@ -16,7 +16,7 @@ import requests
 from .geoip import CountryDB
 from .ntopng import APPS_INTERVAL, INTERFACES_INTERVAL, AppCounter, Ntopng
 from .source import LEASE_SERVERS, SourceError
-from .traffic import TRAFFIC_INTERVAL, StateCounter
+from .traffic import MAX_HOSTNAMES, TRAFFIC_INTERVAL, StateCounter, blocked_triggers
 
 logger = logging.getLogger('unifi-gateway')
 
@@ -194,6 +194,8 @@ class OPNsenseCollector:
         self._ntopng = self._create_ntopng(config)
         self._ntopng_ifids = {}
         self._ntopng_failed = False
+        self._hostnames_failed = False
+        self._log_digest = None
         self._client_devices = {}
         self._wan_dns = []
         self._upstream_dns = []
@@ -246,10 +248,14 @@ class OPNsenseCollector:
         if self._due('nameservers', 300):
             self._upstream_dns = self._get_upstream_dns()
         self.data['nameservers'] = self._upstream_dns or self._wan_dns
+        self.data['triggers'] = []
         if self._due('traffic', TRAFFIC_INTERVAL):
+            if self._ntopng:
+                self._update_hostnames()
             states = self._call('states')
             if states is not None:
                 self._traffic.update(states)
+            self.data['triggers'] = self._blocked_triggers()
         self.data['connections'] = self._traffic.take_connections()
         if self._due('host_table', 60):
             self.data['host_table'] = self._build_host_table()
@@ -714,6 +720,40 @@ class OPNsenseCollector:
         except OSError as e:
             logger.warning('Not reading app traffic from ntopng: %s', e)
             return None
+
+    def _blocked_triggers(self):
+        """Triggers for what the firewall blocked since the last read. The
+        first read only finds where the log ends."""
+        rows = self._call('firewall_log', self._log_digest)
+        if not rows:
+            return []
+        first = self._log_digest is None
+        self._log_digest = rows[0].get('__digest__') or self._log_digest
+        if first:
+            return []
+        return blocked_triggers(rows, self._geoip.country if self._geoip else None)
+
+    def _update_hostnames(self):
+        """Names for the destinations of the connections reported, from the
+        servers in ntopng's active flows on each client interface."""
+        try:
+            if not self._ntopng_ifids:
+                self._ntopng_ifids = self._ntopng.interfaces()
+            names = {}
+            for device in set(self._client_devices.values()):
+                ifid = self._ntopng_ifids.get(device)
+                if ifid is not None:
+                    names.update(self._ntopng.server_names(ifid))
+        except (requests.RequestException, ValueError) as e:
+            if not self._hostnames_failed:
+                logger.warning('Could not read server names from ntopng: %s', e)
+            self._hostnames_failed = True
+            return
+        self._hostnames_failed = False
+        hostnames = self._traffic.hostnames
+        if len(hostnames) > MAX_HOSTNAMES:
+            hostnames.clear()
+        hostnames.update(names)
 
     def _update_apps(self):
         """Per-client app traffic from ntopng, for the inform's dpi_stats.

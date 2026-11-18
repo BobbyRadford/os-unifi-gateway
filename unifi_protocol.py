@@ -34,6 +34,8 @@ USG2_LIVE_UPDATE = 16
 LIVE_INFORM_INTERVAL = 2
 # usg2_caps bit 1 enables the client Ping Test (see pingtest.py)
 USG2_PING_TEST = 1
+# usg2_caps bit 29 makes the controller read the inform's `triggers`
+USG2_TRIGGER_LOGS = 0x20000000
 
 
 def encode_inform(config, data, encryption='CBC'):
@@ -257,7 +259,7 @@ def _uxg_fields(dc, ports, uptime=0):
         # and other paths switch whole output formats, so add only what's used.
         'udapi_version': {'version': 48, 'versionDetail': {'services/dnsForwarder': 4}},
         'udapi_caps': 0,
-        'usg2_caps': USG2_LIVE_UPDATE | USG2_PING_TEST,
+        'usg2_caps': USG2_LIVE_UPDATE | USG2_PING_TEST | USG2_TRIGGER_LOGS,
         'inform_min_interval': LIVE_INFORM_INTERVAL,
         'gw_caps': {},
         'time_ms': int(time.time() * 1000),
@@ -278,6 +280,9 @@ def _uxg_fields(dc, ports, uptime=0):
         # conntrack events (collectors/traffic.py): Traffic Flows, and the
         # clients in Insights > Activity, ranked by how many flows they made
         fields['connections'] = dc.data['connections']
+    if dc.data.get('triggers'):
+        # blocked packets (collectors/traffic.py), as BLOCKED Traffic Flows
+        fields['triggers'] = dc.data['triggers']
     return fields
 
 

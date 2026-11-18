@@ -266,6 +266,11 @@ def test_states_lists_every_state(local):
     assert local.runner.calls[-1] == ['/usr/local/opnsense/scripts/filter/list_states.py']
 
 
+def test_firewall_log_reads_after_a_digest(local):
+    local.runner.actions['filter read log 1000 d1'] = [{'action': 'block', '__digest__': 'd2'}]
+    assert local.firewall_log('d1') == [{'action': 'block', '__digest__': 'd2'}]
+
+
 def test_reverse_dns_skips_unresolved(local):
     def gethostbyaddr(address):
         if address == '192.168.48.2':

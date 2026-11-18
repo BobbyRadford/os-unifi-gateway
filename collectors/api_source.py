@@ -8,7 +8,7 @@ import json
 import urllib.parse
 
 from .opnsense_api import OPNsenseAPI, OPNsenseAPIError, read_api_key_file
-from .source import PingJob, Source, SourceError
+from .source import LOG_LIMIT, PingJob, Source, SourceError
 
 DASHBOARD = 'Lobby: Dashboard'
 PING = 'Diagnostics: Ping'
@@ -144,6 +144,13 @@ class APISource(Source):
     def states(self):
         return _rows(self._get('/api/diagnostics/firewall/query_states',
                                'Diagnostics: Show States', LIST_ALL))
+
+    def firewall_log(self, digest=None):
+        query = {'limit': LOG_LIMIT}
+        if digest:
+            query['digest'] = digest
+        return self._get('/api/diagnostics/firewall/log?' + urllib.parse.urlencode(query),
+                         'Firewall: Log Files: Live View') or []
 
     def ping(self, destination, count, interval, packet_size):
         return APIPing(self, destination, count, interval, packet_size)
