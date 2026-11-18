@@ -10,9 +10,11 @@ until it matches:
   a rule passing the network's traffic. An isolated network also gets a
   rule blocking the other local networks, as UniFi's isolation does: it
   can't start connections to them, but they can still reach it.
-- DHCP (Kea): each subnet's address pool and lease time, its router, DNS
-  servers, NTP servers and domain name, and its reservations ("Fixed IP" on
-  a client in the UniFi UI), matched by MAC.
+- DHCP (Kea or Dnsmasq): each subnet's address pool and lease time, its
+  router, DNS servers, NTP servers and domain name, and its reservations
+  ("Fixed IP" on a client in the UniFi UI), matched by MAC. `[opnsense] dhcp`
+  picks the server; `auto` uses Kea when it is enabled, else Dnsmasq when it
+  is, else Kea.
 - Port forwards (Destination NAT), each with its own pass rule.
 - DNS records from the UI's DNS page (A and AAAA), as Unbound host overrides.
 - Ad blocking, as an Unbound blocklist for the networks that have it.
@@ -31,8 +33,8 @@ UniFi is the source of truth for everything listed above, but the reconciler
 only ever deletes objects it created itself. It marks them by starting their
 description with OWNER_TAG. Objects someone made by hand in OPNsense are
 updated when UniFi asks for something different (a reservation for the same
-MAC, say) but are never removed. A Kea subnet is only created for a network
-the reconciler made, so the LAN's subnet has to exist already.
+MAC, say) but are never removed. A Kea subnet or Dnsmasq range is only
+created for a network the reconciler made, so the LAN's has to exist already.
 
 Set `[apply] mode` in the config file: `off` (default) does nothing, `plan`
 only logs what it would change, and `apply` changes OPNsense.
@@ -55,6 +57,16 @@ RULE_SEQUENCE = 20000
 # The UXG port the LAN runs on. Its VLANs become VLANs on OPNsense's LAN NIC.
 LAN_PORT = 'eth1'
 MODES = ('off', 'plan', 'apply')
+
+# `[opnsense] dhcp`, shared with the collector's lease source. ISC and none
+# leave DHCP alone here.
+DHCP_SERVERS = ('auto', 'kea', 'dnsmasq', 'isc', 'none')
+
+# Dnsmasq's defaults, from its OPNsense template: a range without a lease
+# time leases for a day, and clients get the interface address as router and
+# DNS server unless an option says otherwise
+DNSMASQ_LEASE_TIME = '86400'
+DNSMASQ_OPTIONS = {'3': 'router', '6': 'DNS servers', '42': 'NTP servers'}
 
 # UniFi port forward protocols, as OPNsense names them
 PROTOCOLS = {'tcp': 'tcp', 'udp': 'udp', 'tcp_udp': 'tcp/udp', 'tcp/udp': 'tcp/udp'}
@@ -411,11 +423,15 @@ class Reconciler:
     `api` is an OPNsenseAPI (get/post). Every change is one OPNsense API call,
     logged as it is planned; services are reloaded once at the end."""
 
-    def __init__(self, api, mode='plan'):
+    def __init__(self, api, mode='plan', dhcp='auto'):
         if mode not in MODES:
             raise ValueError('apply mode must be one of %s' % ', '.join(MODES))
+        dhcp = (dhcp or 'auto').strip().lower()
+        if dhcp not in DHCP_SERVERS:
+            raise ValueError('dhcp must be one of %s' % ', '.join(DHCP_SERVERS))
         self.api = api
         self.mode = mode
+        self.dhcp = dhcp
 
     def run(self, intent):
         """Reconcile once. Returns the list of changes as text."""
@@ -424,11 +440,12 @@ class Reconciler:
         changes, reload = [], []
         try:
             # new networks first and old ones last, so nothing is removed
-            # while a Kea subnet or rule still refers to it
+            # while a DHCP subnet or rule still refers to it
             ifaces, removals = self._networks(intent.networks, changes)
+            dhcp_reload = []
             steps = (
-                (lambda: self._kea(intent.dhcp, intent.networks, ifaces, removals, changes),
-                 ('/api/kea/service/reconfigure',)),
+                (lambda: self._dhcp(intent.dhcp, intent.networks, ifaces, removals, changes, dhcp_reload),
+                 dhcp_reload),
                 (lambda: self._rules(intent.networks, ifaces, changes), ('/api/firewall/filter/apply',)),
                 (lambda: self._port_forwards(intent.port_forwards, changes), ('/api/firewall/d_nat/apply',)),
                 (lambda: self._dns_records(intent.dns_records, changes), ('/api/unbound/service/reconfigure',)),
@@ -615,6 +632,40 @@ class Reconciler:
                 self._post('/api/firewall/filter/del_rule/' + current['uuid'])
         return len(changes) > before
 
+    # DHCPv4
+
+    def _dhcp_server(self):
+        """The DHCP server to configure: the configured one, or with `auto`
+        Kea when it is enabled, else Dnsmasq when it is, else Kea. None
+        leaves DHCP alone."""
+        if self.dhcp in ('kea', 'dnsmasq'):
+            return self.dhcp
+        if self.dhcp != 'auto':
+            return None
+        general = self.api.get('/api/kea/dhcpv4/get').get('dhcpv4', {}).get('general', {})
+        if str(general.get('enabled')) == '1':
+            return 'kea'
+        if str(self.api.get('/api/dnsmasq/settings/get').get('dnsmasq', {}).get('enable')) == '1':
+            return 'dnsmasq'
+        return 'kea'
+
+    def _dhcp(self, scopes, networks, ifaces, removals, changes, reload):
+        """Runs the DHCP step for the chosen server, and names the service
+        to reload in `reload` (filled in here, since the server is only
+        known once OPNsense has been asked)."""
+        if not scopes and not networks and not removals:
+            return False
+        server = self._dhcp_server()
+        if server is None:
+            if scopes:
+                logger.debug('DHCP is set to %s, so UniFi DHCP settings are not applied', self.dhcp)
+            return False
+        if server == 'dnsmasq':
+            reload.append('/api/dnsmasq/service/reconfigure')
+            return self._dnsmasq(scopes, networks, ifaces, removals, changes)
+        reload.append('/api/kea/service/reconfigure')
+        return self._kea(scopes, networks, ifaces, removals, changes)
+
     # Kea DHCPv4
 
     def _kea(self, scopes, networks, ifaces, removals, changes):
@@ -728,6 +779,200 @@ class Reconciler:
         options = {'routers': scope.router, 'domain_name_servers': ','.join(scope.dns_servers),
                    'ntp_servers': ','.join(scope.ntp_servers), 'domain_name': scope.domain}
         return {key: value for key, value in options.items() if value}
+
+    # Dnsmasq DHCPv4
+
+    def _dnsmasq(self, scopes, networks, ifaces, removals, changes):
+        """Dnsmasq's take on the Kea step. A scope is the IPv4 range whose
+        start lies in its subnet. Reservations are hosts, which Dnsmasq keeps
+        in one list for every network, matched by MAC. Dnsmasq already gives
+        clients the interface address as router and DNS server, so options
+        are only added where UniFi sets something else."""
+        before = len(changes)
+        managed = {network.subnet: network for network in networks}
+        assigned = self.api.get('/api/interfaces/assignment/search_item').get('rows', [])
+        address_of = {}
+        for row in assigned:
+            try:
+                address_of[row.get('identifier')] = str(ipaddress.ip_interface(row.get('ipaddr') or '').ip)
+            except ValueError:
+                pass
+        ranges = [row for row in self.api.get('/api/dnsmasq/settings/search_range').get('rows', [])
+                  if row.get('start_addr') and ':' not in row['start_addr']]
+        hosts = self.api.get('/api/dnsmasq/settings/search_host').get('rows', [])
+        options = self.api.get('/api/dnsmasq/settings/search_option').get('rows', [])
+        settings = self.api.get('/api/dnsmasq/settings/get').get('dnsmasq', {})
+
+        # Dnsmasq answers on the interfaces it is given, or on all of them
+        # when none are. "All" already covers a new network, and can't be
+        # narrowed to all but a removed one, so it is left as it is.
+        listening = _selected(settings.get('interface'))
+        if listening:
+            serving = [ifaces.get(managed[scope.subnet].vlan) for scope in scopes if scope.subnet in managed]
+            serving = [iface for iface in serving if iface]
+            drop = {iface['identifier'] for _, iface in removals if iface}
+            drop |= {iface for iface in ifaces.values() if iface and iface not in serving}
+            want = [i for i in listening if i not in drop]
+            want += [i for i in serving if i not in want]
+            if want != list(listening):
+                changes.append('Dnsmasq interfaces: %s -> %s' % (','.join(listening), ','.join(want)))
+                self._post('/api/dnsmasq/settings/set', {'dnsmasq': {'interface': ','.join(want)}})
+
+        def in_subnet(address, subnet):
+            try:
+                return ipaddress.ip_address(address) in ipaddress.ip_network(subnet)
+            except ValueError:
+                return False
+
+        covered = set()             # interfaces whose range UniFi still wants
+        for scope in scopes:
+            mine = [row for row in ranges if in_subnet(row['start_addr'], scope.subnet)]
+            # one of ours first, should there be more than one
+            current = next((row for row in mine if _owned(row.get('description'))), mine[0] if mine else None)
+            network = managed.get(scope.subnet)
+            if current is None and network:
+                iface = ifaces.get(network.vlan)
+                changes.append('Dnsmasq range %s - %s (%s): add' % (scope.range_start, scope.range_stop, network.name))
+                self._post('/api/dnsmasq/settings/add_range', {'range': {
+                    'interface': iface or '', 'start_addr': scope.range_start, 'end_addr': scope.range_stop,
+                    'lease_time': str(scope.lease_time), 'domain_type': 'range', 'domain': scope.domain,
+                    'description': '%s %s' % (OWNER_TAG, network.name)}})
+                if iface:
+                    covered.add(iface)
+                    self._dnsmasq_options(scope, iface, str(ipaddress.ip_interface(network.address).ip),
+                                          options, changes)
+                continue
+            if current is None:
+                logger.warning('No Dnsmasq range in %s: create it in OPNsense first', scope.subnet)
+                continue
+
+            iface = current.get('interface') or _interface_for(current['start_addr'], assigned)
+            update = {}
+            if current.get('start_addr') != scope.range_start:
+                update['start_addr'] = scope.range_start
+            if (current.get('end_addr') or '') != scope.range_stop:
+                update['end_addr'] = scope.range_stop
+            if str(current.get('lease_time') or DNSMASQ_LEASE_TIME) != str(scope.lease_time):
+                update['lease_time'] = str(scope.lease_time)
+            # a hand-made range keeps its domain until UniFi sets one
+            if (network or scope.domain) and (current.get('domain') or '') != scope.domain:
+                update.update(domain_type='range', domain=scope.domain)
+            if update:
+                changes.append('Dnsmasq range %s: set %s' % (scope.subnet, update))
+                self._post('/api/dnsmasq/settings/set_range/' + current['uuid'], {'range': update})
+            if iface:
+                covered.add(iface)
+                gateway = str(ipaddress.ip_interface(network.address).ip) if network else address_of.get(iface)
+                self._dnsmasq_options(scope, iface, gateway, options, changes)
+
+        # owned options on interfaces UniFi no longer sets them for
+        for option in options:
+            if _owned(option.get('description')) and option.get('interface') not in covered:
+                changes.append('Dnsmasq option %s on %s: remove' % (option.get('option'), option.get('interface')))
+                self._post('/api/dnsmasq/settings/del_option/' + option['uuid'])
+
+        # owned ranges of networks UniFi no longer serves
+        served = [ipaddress.ip_network(scope.subnet) for scope in scopes]
+        for row in ranges:
+            if _owned(row.get('description')) and not any(in_subnet(row['start_addr'], s.subnet) for s in scopes):
+                changes.append('Dnsmasq range %s - %s: remove' % (row['start_addr'], row.get('end_addr')))
+                self._post('/api/dnsmasq/settings/del_range/' + row['uuid'])
+                # its fixed IPs go with it, as with a Kea subnet
+                for assignment in assigned:
+                    try:
+                        network = ipaddress.ip_interface(assignment.get('ipaddr') or '').network
+                    except ValueError:
+                        continue
+                    if ipaddress.ip_address(row['start_addr']) in network:
+                        served.append(network)
+
+        self._dnsmasq_hosts(scopes, hosts, served, changes)
+        return len(changes) > before
+
+    def _dnsmasq_options(self, scope, iface, gateway, options, changes):
+        """The router, DNS and NTP options UniFi sets for a range's
+        interface, where they differ from Dnsmasq's defaults. A hand-made
+        option for the same interface and number is updated, like a
+        hand-made reservation, and kept when UniFi sets nothing."""
+        want = {}
+        if scope.router and scope.router != gateway:
+            want['3'] = scope.router
+        if scope.dns_servers and scope.dns_servers != [gateway]:
+            want['6'] = ','.join(scope.dns_servers)
+        if scope.ntp_servers:
+            want['42'] = ','.join(scope.ntp_servers)
+
+        here = [o for o in options if o.get('interface') == iface and (o.get('type') or 'set') == 'set'
+                and not o.get('tag') and not o.get('option6')]
+        for number, value in sorted(want.items(), key=lambda item: int(item[0])):
+            same = [o for o in here if str(o.get('option')) == number]
+            current = next((o for o in same if _owned(o.get('description'))), same[0] if same else None)
+            if current is None:
+                changes.append('Dnsmasq %s on %s: %s' % (DNSMASQ_OPTIONS[number], iface, value))
+                self._post('/api/dnsmasq/settings/add_option', {'option': {
+                    'type': 'set', 'option': number, 'interface': iface, 'value': value, 'force': '0',
+                    'description': '%s %s from UniFi' % (OWNER_TAG, DNSMASQ_OPTIONS[number])}})
+            elif current.get('value') != value:
+                changes.append('Dnsmasq %s on %s: %s -> %s' % (DNSMASQ_OPTIONS[number], iface,
+                                                               current.get('value'), value))
+                self._post('/api/dnsmasq/settings/set_option/' + current['uuid'], {'option': {'value': value}})
+        for option in here:
+            if _owned(option.get('description')) and str(option.get('option')) not in want:
+                changes.append('Dnsmasq %s on %s: remove' % (
+                    DNSMASQ_OPTIONS.get(str(option.get('option')), 'option ' + str(option.get('option'))), iface))
+                self._post('/api/dnsmasq/settings/del_option/' + option['uuid'])
+
+    def _dnsmasq_hosts(self, scopes, hosts, served, changes):
+        """Fixed IPs as Dnsmasq hosts, matched by MAC across every network.
+        An owned host UniFi no longer wants is removed only from `served`
+        networks (UniFi's DHCP networks, and those whose range was just
+        removed), so turning UniFi's DHCP off on a hand-made network keeps
+        its fixed IPs, as it does with Kea."""
+        by_mac = {}
+        for host in hosts:
+            for mac in (host.get('hwaddr') or '').split(','):
+                if mac.strip():
+                    by_mac.setdefault(mac.strip().lower(), host)
+        wanted = set()
+        for scope in scopes:
+            network = ipaddress.ip_network(scope.subnet)
+            for mac, ip in sorted(scope.reservations.items()):
+                wanted.add(mac)
+                if ipaddress.ip_address(ip) not in network:
+                    logger.warning('Skipping reservation %s -> %s: not in %s', mac, ip, scope.subnet)
+                    continue
+                current = by_mac.get(mac)
+                if current is None:
+                    changes.append('Dnsmasq host %s -> %s: add' % (mac, ip))
+                    self._post('/api/dnsmasq/settings/add_host', {'host': {
+                        'hwaddr': mac, 'ip': ip, 'descr': OWNER_TAG + ' fixed IP from UniFi'}})
+                    continue
+                addresses = [a.strip() for a in (current.get('ip') or '').split(',') if a.strip()]
+                if ip in addresses:
+                    continue
+                if len([m for m in (current.get('hwaddr') or '').split(',') if m.strip()]) > 1:
+                    # its addresses are shared by its other MACs
+                    logger.warning('Not moving %s to %s: its Dnsmasq host has more than one MAC', mac, ip)
+                    continue
+                # UniFi's address replaces the IPv4 ones; IPv6 ones stay
+                keep = [a for a in addresses if ':' in a]
+                changes.append('Dnsmasq host %s: %s -> %s' % (mac, ','.join(addresses) or '-', ip))
+                self._post('/api/dnsmasq/settings/set_host/' + current['uuid'],
+                           {'host': {'ip': ','.join([ip] + keep)}})
+        def in_served(addresses):
+            for address in (addresses or '').split(','):
+                try:
+                    if any(ipaddress.ip_address(address.strip()) in network for network in served):
+                        return True
+                except ValueError:
+                    continue
+            return False
+
+        for host in hosts:
+            macs = [m.strip().lower() for m in (host.get('hwaddr') or '').split(',') if m.strip()]
+            if _owned(host.get('descr')) and not any(mac in wanted for mac in macs) and in_served(host.get('ip')):
+                changes.append('Dnsmasq host %s -> %s: remove' % (','.join(macs), host.get('ip')))
+                self._post('/api/dnsmasq/settings/del_host/' + host['uuid'])
 
     # Destination NAT
 

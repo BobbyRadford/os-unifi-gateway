@@ -229,11 +229,11 @@ With apply mode on, the daemon makes OPNsense match what you set in UniFi. The c
 
 | Set in UniFi | Changes in OPNsense |
 |---|---|
-| A network with a VLAN ID and a gateway IP | a VLAN on the LAN NIC, an interface with the gateway address, a Kea subnet, and a rule passing its traffic |
+| A network with a VLAN ID and a gateway IP | a VLAN on the LAN NIC, an interface with the gateway address, a Kea subnet or Dnsmasq range, and a rule passing its traffic |
 | Isolate network | rules ahead of it blocking each of the other local networks |
-| A network's DHCP range and lease time | the Kea subnet's pool and lease time |
-| A network's DHCP gateway, DNS servers, NTP servers and domain name | the Kea subnet's options |
-| Fixed IP on a client | a Kea reservation for its MAC |
+| A network's DHCP range and lease time | the Kea subnet's pool, or the Dnsmasq range, and its lease time |
+| A network's DHCP gateway, DNS servers, NTP servers and domain name | the Kea subnet's options, or Dnsmasq options and the range's domain |
+| Fixed IP on a client | a Kea reservation, or a Dnsmasq host, for its MAC |
 | Port forwarding rules | Destination NAT rules, each passing its own traffic |
 | DNS records (A and AAAA) | Unbound host overrides |
 | Static routes (next hop or blackhole) | static routes, through a gateway with the next hop's address (added if missing) or Null4/Null6 |
@@ -255,7 +255,10 @@ The daemon applies the configuration once at start and again each time the contr
 
 The daemon only deletes what it created. Its objects have descriptions starting with `[unifi]`. Anything made by hand stays, though a hand-made reservation or host override is updated if UniFi asks for a different address for the same MAC or name.
 
-On a hand-made Kea subnet such as the LAN, the daemon sets only the options UniFi sets, which turns Kea's option autocollect off for that subnet. It creates a Kea subnet only for a VLAN network it built, so the LAN's own subnet has to exist in OPNsense already.
+DHCP goes to the server `[opnsense] dhcp` names. `auto` picks Kea when it is enabled, else Dnsmasq when it is, else Kea; `isc` and `none` leave DHCP alone. The daemon creates a Kea subnet or Dnsmasq range only for a VLAN network it built, so the LAN's own one has to exist in OPNsense already.
+
+- **Kea.** On a hand-made Kea subnet such as the LAN, the daemon sets only the options UniFi sets, which turns Kea's option autocollect off for that subnet.
+- **Dnsmasq.** A network's scope is the IPv4 range that starts inside it. Dnsmasq already gives clients the interface address as router and DNS server, so an option is only added where UniFi sets something else, and a hand-made option for the same interface and number is updated instead. Fixed IPs are matched against every Dnsmasq host by MAC (a host with more than one MAC isn't moved). When Dnsmasq has no interfaces selected it answers on all of them, and the daemon leaves that alone.
 
 ### Limits
 
@@ -284,7 +287,8 @@ verify_ssl = False
 # Interfaces are matched by description, then identifier (wan, lan, opt1), then device
 # wan_interface = WAN
 # lan_interface = LAN
-# DHCP lease source: auto, dnsmasq, kea, isc or none
+# DHCP server for leases and for [apply]: auto, dnsmasq, kea, isc or none
+# (isc and none leave DHCP alone when applying)
 # dhcp = auto
 
 [gateway]
