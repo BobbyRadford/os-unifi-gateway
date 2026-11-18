@@ -54,11 +54,14 @@ class Ntopng:
                 password = f.read().strip()
         return cls(url, config.get('ntopng', 'user', fallback='admin'), password)
 
-    def _get(self, path, **params):
+    def _get(self, path, missing=None, **params):
+        """The response's `rsp`; `missing` when ntopng answers 404."""
         # no Session: ntopng answers basic auth with an empty session cookie,
         # and drops host requests that send it back
         response = requests.get(self.url + path, params=params, auth=self.auth,
                                 timeout=self.timeout, allow_redirects=False)
+        if response.status_code == 404:
+            return missing
         if response.status_code != 200:
             # a wrong password redirects to the login page
             raise requests.HTTPError('%s: HTTP %d' % (path, response.status_code))
@@ -72,10 +75,8 @@ class Ntopng:
     def host_apps(self, ifid, ip):
         """{nDPI app name: {'bytes.sent', 'bytes.rcvd', ...}} for a host,
         counted since ntopng first saw it; {} if it hasn't."""
-        try:
-            host = self._get('/lua/rest/v2/get/host/data.lua', ifid=ifid, host=ip)
-        except ValueError:
-            return {}
+        # 404 for a host ntopng hasn't seen on that interface
+        host = self._get('/lua/rest/v2/get/host/data.lua', missing={}, ifid=ifid, host=ip)
         return (host or {}).get('ndpi') or {}
 
 

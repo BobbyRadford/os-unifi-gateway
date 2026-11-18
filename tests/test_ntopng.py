@@ -69,3 +69,11 @@ def test_countries_ride_on_the_unknown_app():
              'countries': [{'iso': 'DE', 'txBytes': 1, 'rxBytes': 9},
                            {'iso': 'US', 'txBytes': 2, 'rxBytes': 3}]}]},
     ]
+
+
+def test_a_host_ntopng_hasnt_seen_has_no_apps(monkeypatch):
+    class Response:
+        status_code = 404
+
+    monkeypatch.setattr('collectors.ntopng.requests.get', lambda *a, **k: Response())
+    assert Ntopng('http://ntopng', 'admin', 'pw').host_apps(2, '10.0.0.9') == {}
