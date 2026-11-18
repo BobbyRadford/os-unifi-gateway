@@ -222,7 +222,8 @@ class UnifiGateway:
             logger.warning('[apply] needs the OPNsense API source; not applying')
             return
         from collectors.api_source import create_api
-        self.reconciler = Reconciler(create_api(self.config), mode)
+        self.reconciler = Reconciler(create_api(self.config), mode,
+                                     dhcp=self.config.get('opnsense', 'dhcp', fallback='auto'))
         logger.info('Applying the controller config to OPNsense (mode: %s)', mode)
         try:
             with open(os.path.join(os.path.dirname(CONFIG_FILE) or '.', 'system_cfg.json')) as f:

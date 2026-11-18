@@ -68,6 +68,13 @@ class FakeOPNsense:
         self.geoip_url = ''
         self.mdns = None            # os-mdns-repeater settings when installed
         self.ddns = None            # os-ddclient accounts when installed
+        # Kea is what these tests configure unless they turn Dnsmasq on
+        self.kea_enabled = None     # Kea's general "enabled", left out when None
+        self.dnsmasq_enabled = '0'
+        self.dnsmasq_interfaces = []
+        self.dnsmasq_ranges = []
+        self.dnsmasq_hosts = []
+        self.dnsmasq_options = []
         self.posts = []
 
     def get(self, path):
@@ -80,7 +87,15 @@ class FakeOPNsense:
             return plugins[path]
         general = {'valid_lifetime': self.lease,
                    'interfaces': {i: {'value': i.upper(), 'selected': 1} for i in self.kea_interfaces}}
+        if self.kea_enabled is not None:
+            general['enabled'] = self.kea_enabled
+        dnsmasq = {'enable': self.dnsmasq_enabled,
+                   'interface': {i: {'value': i.upper(), 'selected': 1} for i in self.dnsmasq_interfaces}}
         return {
+            '/api/dnsmasq/settings/get': {'dnsmasq': dnsmasq},
+            '/api/dnsmasq/settings/search_range': {'rows': self.dnsmasq_ranges},
+            '/api/dnsmasq/settings/search_host': {'rows': self.dnsmasq_hosts},
+            '/api/dnsmasq/settings/search_option': {'rows': self.dnsmasq_options},
             '/api/interfaces/assignment/search_item': {'rows': self.assigned},
             '/api/interfaces/vlan_settings/search_item': {'rows': self.vlans},
             '/api/firewall/filter/search_rule': {'rows': self.rules},
@@ -703,3 +718,214 @@ def test_region_blocking_off_removes_it_and_port_forwards_keep_its_nat_rule():
     assert api.paths() == ['/api/firewall/d_nat/del_rule/n1', '/api/firewall/filter/del_rule/f1',
                            '/api/firewall/alias/del_item/a1', '/api/firewall/alias/reconfigure',
                            '/api/firewall/filter/apply']
+
+
+# ── Dnsmasq ──────────────────────────────────────────────────────────────
+
+def dnsmasq_api():
+    """OPNsense serving DHCP with Dnsmasq: Kea off, the LAN's range made by hand."""
+    api = FakeOPNsense()
+    api.kea_enabled = '0'
+    api.dnsmasq_enabled = '1'
+    api.dnsmasq_ranges = [{'uuid': 'rng-lan', 'interface': 'lan', 'start_addr': '10.0.0.100',
+                           'end_addr': '10.0.0.254', 'lease_time': '4000', 'domain_type': 'range',
+                           'domain': '', 'description': ''}]
+    return api
+
+
+def dnsmasq_host(mac, ip, descr='', uuid=None):
+    return {'uuid': uuid or 'h-' + ip, 'host': '', 'hwaddr': mac, 'ip': ip, 'descr': descr}
+
+
+def test_auto_picks_the_dhcp_server_in_use():
+    scope = DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000, {'aa:aa:aa:aa:aa:01': '10.0.0.20'})
+    api = dnsmasq_api()
+    Reconciler(api, 'apply').run(Intent(dhcp=[scope]))
+    assert api.paths() == ['/api/dnsmasq/settings/add_host', '/api/dnsmasq/service/reconfigure']
+
+    # Kea wins while it is enabled, even next to Dnsmasq
+    api = dnsmasq_api()
+    api.kea_enabled = '1'
+    Reconciler(api, 'apply').run(Intent(dhcp=[scope]))
+    assert api.paths() == ['/api/kea/dhcpv4/add_reservation', '/api/kea/service/reconfigure']
+
+
+def test_dhcp_setting_forces_or_skips_a_server():
+    scope = DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000, {'aa:aa:aa:aa:aa:01': '10.0.0.20'})
+    api = dnsmasq_api()
+    Reconciler(api, 'apply', dhcp='kea').run(Intent(dhcp=[scope]))
+    assert api.paths() == ['/api/kea/dhcpv4/add_reservation', '/api/kea/service/reconfigure']
+    for setting in ('none', 'isc'):
+        api = dnsmasq_api()
+        assert Reconciler(api, 'apply', dhcp=setting).run(Intent(dhcp=[scope])) == []
+        assert api.posts == []
+    with pytest.raises(ValueError):
+        Reconciler(api, 'apply', dhcp='bind')
+
+
+def test_dnsmasq_applies_captured_system_cfg():
+    api = dnsmasq_api()
+    api.dnsmasq_ranges[0]['lease_time'] = ''        # the default, a day
+    Reconciler(api, 'apply').run(intent_from_system_cfg(SYSTEM_CFG))
+    assert api.paths()[:2] == ['/api/dnsmasq/settings/set_range/rng-lan', '/api/dnsmasq/settings/add_host']
+    assert '/api/dnsmasq/service/reconfigure' in api.paths()
+    assert not any('/kea/' in path for path in api.paths())
+    posts = dict(api.posts)
+    assert posts['/api/dnsmasq/settings/set_range/rng-lan'] == {'range': {'lease_time': '4000'}}
+    host = posts['/api/dnsmasq/settings/add_host']['host']
+    assert (host['hwaddr'], host['ip']) == ('00:00:5e:00:53:70', '10.0.0.112')
+    assert host['descr'].startswith(OWNER_TAG)
+    # the router and DNS server UniFi sends are Dnsmasq's defaults already
+    assert '/api/dnsmasq/settings/add_option' not in posts
+
+
+def test_dnsmasq_matching_state_changes_nothing():
+    api = dnsmasq_api()
+    api.dnsmasq_hosts = [dnsmasq_host('00:00:5E:00:53:70', '10.0.0.112', OWNER_TAG)]
+    scope = DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000, {'00:00:5e:00:53:70': '10.0.0.112'},
+                      router='10.0.0.1', dns_servers=['10.0.0.1'])
+    assert Reconciler(api, 'apply').run(Intent(dhcp=[scope])) == []
+    assert api.posts == []
+
+
+def test_dnsmasq_default_lease_time_is_a_day():
+    api = dnsmasq_api()
+    api.dnsmasq_ranges[0]['lease_time'] = ''
+    assert Reconciler(api, 'apply').run(Intent(dhcp=[DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 86400)])) == []
+
+
+def test_dnsmasq_range_follows_unifis_pool():
+    api = dnsmasq_api()
+    Reconciler(api, 'apply').run(Intent(dhcp=[DhcpScope('10.0.0.0/24', '10.0.0.50', '10.0.0.150', 4000)]))
+    assert api.posts[0] == ('/api/dnsmasq/settings/set_range/rng-lan',
+                            {'range': {'start_addr': '10.0.0.50', 'end_addr': '10.0.0.150'}})
+
+
+def test_dnsmasq_only_owned_hosts_are_removed():
+    api = dnsmasq_api()
+    api.dnsmasq_hosts = [dnsmasq_host('74:ac:b9:17:3d:65', '10.0.0.10', 'USW 16 PoE'),
+                         dnsmasq_host('aa:aa:aa:aa:aa:01', '10.0.0.20', OWNER_TAG + ' fixed IP from UniFi')]
+    Reconciler(api, 'apply').run(Intent(dhcp=[DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000)]))
+    assert api.paths() == ['/api/dnsmasq/settings/del_host/h-10.0.0.20', '/api/dnsmasq/service/reconfigure']
+
+
+def test_dnsmasq_hand_made_host_is_moved_keeping_its_ipv6():
+    api = dnsmasq_api()
+    api.dnsmasq_hosts = [dnsmasq_host('74:ac:b9:17:3d:65', '10.0.0.10,fd00::10', 'USW 16 PoE', uuid='h1')]
+    scope = DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000, {'74:ac:b9:17:3d:65': '10.0.0.11'})
+    Reconciler(api, 'apply').run(Intent(dhcp=[scope]))
+    assert api.posts[0] == ('/api/dnsmasq/settings/set_host/h1', {'host': {'ip': '10.0.0.11,fd00::10'}})
+
+
+def test_dnsmasq_host_shared_by_macs_is_not_moved():
+    api = dnsmasq_api()
+    api.dnsmasq_hosts = [dnsmasq_host('74:ac:b9:17:3d:65,74:ac:b9:17:3d:66', '10.0.0.10', 'laptop')]
+    scope = DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000, {'74:ac:b9:17:3d:66': '10.0.0.11'})
+    assert Reconciler(api, 'apply').run(Intent(dhcp=[scope])) == []
+
+
+def test_dnsmasq_missing_range_is_skipped():
+    api = dnsmasq_api()
+    scope = DhcpScope('10.0.40.0/24', '10.0.40.100', '10.0.40.254', 4000)
+    assert Reconciler(api, 'apply').run(Intent(dhcp=[scope])) == []
+    assert api.posts == []
+
+
+def test_dnsmasq_options_only_where_unifi_differs():
+    api = dnsmasq_api()
+    api.dnsmasq_options = [
+        # made by hand: updated when UniFi sets its own, else kept
+        {'uuid': 'o-dns', 'type': 'set', 'option': '6', 'interface': 'lan', 'value': '10.0.0.53', 'description': ''},
+        {'uuid': 'o-tftp', 'type': 'set', 'option': '66', 'interface': 'lan', 'value': 'tftp', 'description': ''},
+    ]
+    scope = DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000, router='10.0.0.1',
+                      dns_servers=['1.1.1.1', '9.9.9.9'], ntp_servers=['10.0.0.1'])
+    Reconciler(api, 'apply').run(Intent(dhcp=[scope]))
+    assert api.posts[:2] == [
+        ('/api/dnsmasq/settings/set_option/o-dns', {'option': {'value': '1.1.1.1,9.9.9.9'}}),
+        ('/api/dnsmasq/settings/add_option', {'option': {
+            'type': 'set', 'option': '42', 'interface': 'lan', 'value': '10.0.0.1', 'force': '0',
+            'description': OWNER_TAG + ' NTP servers from UniFi'}}),
+    ]
+    # no router option: 10.0.0.1 is the LAN's own address
+
+
+def test_dnsmasq_owned_options_go_when_unifi_drops_them():
+    api = dnsmasq_api()
+    api.dnsmasq_options = [{'uuid': 'o-ntp', 'type': 'set', 'option': '42', 'interface': 'lan',
+                            'value': '10.0.0.1', 'description': OWNER_TAG + ' NTP servers from UniFi'}]
+    Reconciler(api, 'apply').run(Intent(dhcp=[DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000)]))
+    assert api.paths() == ['/api/dnsmasq/settings/del_option/o-ntp', '/api/dnsmasq/service/reconfigure']
+
+
+def test_dnsmasq_new_network_gets_a_range():
+    api = dnsmasq_api()
+    api.dnsmasq_interfaces = ['lan']
+    Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
+    assert api.paths() == [
+        '/api/interfaces/vlan_settings/add_item',
+        '/api/interfaces/vlan_settings/reconfigure',
+        '/api/interfaces/assignment/add_item',
+        '/api/interfaces/assignment/reconfigure',
+        '/api/dnsmasq/settings/set',
+        '/api/dnsmasq/settings/add_range',
+        '/api/firewall/filter/add_rule',
+        '/api/firewall/filter/add_rule',
+        '/api/dnsmasq/service/reconfigure',
+        '/api/firewall/filter/apply',
+    ]
+    posts = dict(api.posts)
+    assert posts['/api/dnsmasq/settings/set'] == {'dnsmasq': {'interface': 'lan,opt1'}}
+    added = posts['/api/dnsmasq/settings/add_range']['range']
+    assert (added['interface'], added['start_addr'], added['end_addr']) == ('opt1', '10.0.99.100', '10.0.99.200')
+    assert added['description'] == OWNER_TAG + ' TEST99'
+
+
+def test_dnsmasq_listening_everywhere_is_left_alone():
+    # no interfaces selected means all of them, which already covers the new one
+    api = dnsmasq_api()
+    Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
+    assert '/api/dnsmasq/settings/set' not in api.paths()
+    assert '/api/dnsmasq/settings/add_range' in api.paths()
+
+
+def test_dnsmasq_removed_network_loses_its_range_first():
+    api = dnsmasq_api()
+    api.vlans = [{'uuid': 'v99', 'if': 'vtnet1', 'tag': '99', 'vlanif': 'vlan0.99 [TEST99]',
+                  'descr': OWNER_TAG + ' TEST99'}]
+    api.assigned.append({'uuid': 'opt1', 'identifier': 'opt1', 'if': 'vlan0.99', 'ipaddr': '10.0.99.1/24',
+                         'enable': '1'})
+    api.dnsmasq_interfaces = ['lan', 'opt1']
+    api.dnsmasq_ranges.append({'uuid': 'rng-99', 'interface': 'opt1', 'start_addr': '10.0.99.100',
+                               'end_addr': '10.0.99.200', 'lease_time': '', 'description': OWNER_TAG + ' TEST99'})
+    api.dnsmasq_options = [{'uuid': 'o-99', 'type': 'set', 'option': '42', 'interface': 'opt1',
+                            'value': '10.0.99.1', 'description': OWNER_TAG + ' NTP servers from UniFi'}]
+    api.dnsmasq_hosts = [dnsmasq_host('aa:aa:aa:aa:aa:99', '10.0.99.5', OWNER_TAG)]
+    Reconciler(api, 'apply').run(Intent(dhcp=[DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000)]))
+    paths = api.paths()
+    assert paths[:5] == [
+        '/api/dnsmasq/settings/set',
+        '/api/dnsmasq/settings/del_option/o-99',
+        '/api/dnsmasq/settings/del_range/rng-99',
+        '/api/dnsmasq/settings/del_host/h-10.0.99.5',
+        '/api/dnsmasq/service/reconfigure',
+    ]
+    assert dict(api.posts)['/api/dnsmasq/settings/set'] == {'dnsmasq': {'interface': 'lan'}}
+    # the interface and VLAN only go once Dnsmasq no longer uses them
+    assert paths.index('/api/interfaces/assignment/del_item/opt1') > paths.index('/api/dnsmasq/service/reconfigure')
+
+
+def test_dnsmasq_plan_mode_never_posts():
+    api = dnsmasq_api()
+    changes = Reconciler(api, 'plan').run(intent_from_system_cfg(VLAN_CFG))
+    assert any('Dnsmasq range' in change for change in changes)
+    assert api.posts == []
+
+
+def test_dnsmasq_keeps_fixed_ips_where_unifi_no_longer_serves_dhcp():
+    # as with Kea: turning UniFi's DHCP off for a hand-made network keeps its fixed IPs
+    api = dnsmasq_api()
+    api.dnsmasq_ranges.append({'uuid': 'rng-40', 'interface': 'opt3', 'start_addr': '10.0.40.100',
+                               'end_addr': '10.0.40.199', 'lease_time': '', 'description': 'IoT'})
+    api.dnsmasq_hosts = [dnsmasq_host('aa:aa:aa:aa:aa:40', '10.0.40.5', OWNER_TAG + ' fixed IP from UniFi')]
+    assert Reconciler(api, 'apply').run(Intent(dhcp=[DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000)])) == []
