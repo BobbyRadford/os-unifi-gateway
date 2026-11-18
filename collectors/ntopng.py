@@ -41,7 +41,6 @@ class Ntopng:
         self.url = url.rstrip('/')
         self.auth = (user, password)
         self.timeout = timeout
-        self.session = requests.Session()
 
     @classmethod
     def from_config(cls, config):
@@ -56,8 +55,10 @@ class Ntopng:
         return cls(url, config.get('ntopng', 'user', fallback='admin'), password)
 
     def _get(self, path, **params):
-        response = self.session.get(self.url + path, params=params, auth=self.auth,
-                                    timeout=self.timeout, allow_redirects=False)
+        # no Session: ntopng answers basic auth with an empty session cookie,
+        # and drops host requests that send it back
+        response = requests.get(self.url + path, params=params, auth=self.auth,
+                                timeout=self.timeout, allow_redirects=False)
         if response.status_code != 200:
             # a wrong password redirects to the login page
             raise requests.HTTPError('%s: HTTP %d' % (path, response.status_code))
