@@ -353,10 +353,21 @@ def _app_blocks(udapi):
 def _firewall_rules(udapi):
     """The rules from the UI's firewall rule lists. The controller puts them
     in the chain of their rule set (LAN_IN), among its own rules, with
-    their rule index as their ID and a FIREWALL_RULE trigger tag. Its own
-    rules have IDs from 10000. A rule that can't be matched in OPNsense is
-    skipped with a warning, rather than applied as something wider."""
+    their rule index as their ID (from 20000) and a FIREWALL_RULE trigger
+    tag. A rule that can't be matched in OPNsense is skipped with a
+    warning, rather than applied as something wider."""
     sets = {s['identification']['name']: s for s in udapi.get('firewall/sets', [])}
+    # a network as a source or destination is a set the gateway makes
+    # itself: NETv4_br40 holds the network, ADDRv4_br40 the gateway's address
+    for iface in udapi.get('interfaces', []):
+        for address in iface.get('addresses') or []:
+            if address.get('type') != 'static' or not address.get('cidr'):
+                continue
+            ip = ipaddress.ip_interface(address['cidr'])
+            for kind, entry in (('NET', ip.network), ('ADDR', ip.ip)):
+                name = '%s%s_%s' % (kind, address.get('version', 'v4'), iface['identification']['id'])
+                sets.setdefault(name, {'identification': {'name': name, 'type': 'address'}, 'entries': []})
+                sets[name]['entries'].append(str(entry))
     known = {'id', 'description', 'target', 'ipVersion', 'protocol', 'icmpType', 'icmpv6Type',
              'connectionState', 'source', 'destination', 'log', 'triggerTag', 'enabled'}
     rules = []
@@ -364,7 +375,7 @@ def _firewall_rules(udapi):
         name = (chain.get('config') or {}).get('name')
         for rule in chain.get('rules', []):
             tag = (rule.get('triggerTag') or {}).get('type')
-            if not (tag == 'FIREWALL_RULE' or (tag is None and rule.get('id', 10000) < 10000)):
+            if tag != 'FIREWALL_RULE':
                 continue
             label = '%s rule %s (%s)' % (name, rule.get('id'), rule.get('description', ''))
             if name not in FIREWALL_CHAINS:

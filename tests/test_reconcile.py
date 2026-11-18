@@ -708,13 +708,15 @@ def test_region_blocking_off_removes_it_and_port_forwards_keep_its_nat_rule():
 # Firewall rules from the UI as the controller builds them (decompiled
 # Network 10.6.109), among its own rules
 def firewall_rule(id, **fields):
-    return dict({'id': id, 'ipVersion': 'v4only', 'target': 'DROP',
+    return dict({'id': id + 18000, 'ipVersion': 'v4only', 'target': 'DROP',
                  'triggerTag': {'id': 'r%d' % id, 'type': 'FIREWALL_RULE'}}, **fields)
 
 
 FIREWALL_CFG = {'udapi': {
+    # the gateway makes NETv4_br40 from the bridge's address
+    'interfaces': [{'identification': {'id': 'br40', 'type': 'bridge'},
+                    'addresses': [{'cidr': '10.0.40.1/24', 'type': 'static', 'version': 'v4'}]}],
     'firewall/sets': [
-        {'entries': ['10.0.40.0/24'], 'identification': {'name': 'NETv4_br40', 'type': 'address'}},
         {'entries': ['80', '8000:8080'], 'identification': {'name': 'g-ports', 'type': 'port'}},
         {'identification': {'name': 'g-empty', 'type': 'address'}},
         {'entries': ['00:00:5e:00:53:01'], 'identification': {'name': 'g-macs', 'type': 'mac'}},
@@ -732,7 +734,7 @@ FIREWALL_CFG = {'udapi': {
                           source={'address': '10.0.40.10-10.0.40.20'}, destination={'sets': ['g-ports']}),
             {'description': '[LAN_IN]isolate IPv4 traffic', 'id': 60001, 'ipVersion': 'v4only',
              'source': {'sets': ['NETv4_br40']}, 'target': 'DROP'},
-            {'applicationId': 112, 'categoryId': 4, 'id': 3, 'ipVersion': 'v4only', 'target': 'DROP',
+            {'applicationId': 112, 'categoryId': 4, 'id': 20010, 'ipVersion': 'v4only', 'target': 'DROP',
              'triggerTag': {'id': 't1', 'type': 'TRAFFIC_RULE'}},
             {'id': 2147483647, 'ipVersion': 'v4only', 'log': False, 'target': 'RETURN'},
         ]},
@@ -747,12 +749,12 @@ FIREWALL_CFG = {'udapi': {
 
 def test_firewall_rules_from_the_ui():
     assert intent_from_system_cfg(FIREWALL_CFG).firewall_rules == [
-        FirewallRule('LAN_IN', 2000, 'Block IoT SSH', 'block', 'inet', 'TCP', source=['10.0.40.0/24'],
+        FirewallRule('LAN_IN', 20000, 'Block IoT SSH', 'block', 'inet', 'TCP', source=['10.0.40.0/24'],
                      destination=['10.0.0.50'], destination_ports=['22'], log=True),
         # 'both' with only IPv4 addresses is IPv4
-        FirewallRule('LAN_IN', 2005, 'Web', 'block', 'inet', 'TCP', source=['10.0.40.10-10.0.40.20'],
+        FirewallRule('LAN_IN', 20005, 'Web', 'block', 'inet', 'TCP', source=['10.0.40.10-10.0.40.20'],
                      destination_ports=['80', '8000-8080']),
-        FirewallRule('WAN_IN', 2000, 'Allow NAS', 'pass', 'inet6', 'TCP', destination=['2001:db8::5'],
+        FirewallRule('WAN_IN', 20000, 'Allow NAS', 'pass', 'inet6', 'TCP', destination=['2001:db8::5'],
                      destination_ports=['443']),
     ]
 
@@ -762,7 +764,7 @@ def test_firewall_rules_go_ahead_of_network_rules_with_aliases_for_lists():
     rules = intent_from_system_cfg(FIREWALL_CFG).firewall_rules
     wanted, aliases = Reconciler._firewall_plan(rules, {40: 'opt1', 50: None})
     ssh, web, nas = (wanted[OWNER_TAG + ' Firewall ' + d] for d in
-                     ('LAN_IN 2000: Block IoT SSH', 'LAN_IN 2005: Web', 'WANv6_IN 2000: Allow NAS'))
+                     ('LAN_IN 20000: Block IoT SSH', 'LAN_IN 20005: Web', 'WANv6_IN 20000: Allow NAS'))
     assert (ssh['interface'], ssh['action'], ssh['protocol'], ssh['log']) == ('lan,opt1', 'block', 'TCP', '1')
     assert (ssh['source_net'], ssh['destination_net'], ssh['destination_port']) == ('10.0.40.0/24', '10.0.0.50', '22')
     # to any destination but the firewall itself
