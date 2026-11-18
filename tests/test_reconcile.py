@@ -620,8 +620,20 @@ def test_region_blocking_builds_alias_then_rules():
     incoming, outgoing = region[1][1]['rule'], region[2][1]['rule']
     assert (incoming['interface'], incoming['source_net'], incoming['destination_net']) == ('', 'unifi_region_block', 'any')
     assert (outgoing['source_net'], outgoing['destination_net']) == ('any', 'unifi_region_block')
+    assert incoming['log'] == outgoing['log'] == '1'
     nat = region[3][1]['rule']
     assert (nat['nordr'], nat['source']['network']) == ('1', 'unifi_region_block')
+
+
+def test_region_blocking_turns_on_logging_for_an_existing_rule():
+    api = FakeOPNsense()
+    api.geoip_url = 'https://example.com/geoip.zip'
+    api.aliases = [{'uuid': 'a1', 'name': 'unifi_region_block', 'content': 'AF', 'enabled': '1',
+                    'description': OWNER_TAG + ' Region blocking'}]
+    api.rules = [dict(Reconciler._region_rules('outgoing')[0]['outgoing'], uuid='f1', log='0')]
+    Reconciler(api, 'apply').run(Intent(region_block={'countries': ['AF'], 'direction': 'outgoing'}))
+    assert api.paths()[0] == '/api/firewall/filter/set_rule/f1'
+    assert api.posts[0][1]['rule']['log'] == '1'
 
 
 def test_region_blocking_off_removes_it_and_port_forwards_keep_its_nat_rule():

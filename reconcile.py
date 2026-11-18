@@ -927,9 +927,10 @@ class Reconciler:
     def _region_rules(direction):
         """Floating block rules (on every interface, ahead of interface rules)
         and, for incoming traffic, a "no RDR" rule ahead of the port forwards:
-        they use "rdr pass", which skips the filter rules."""
+        they use "rdr pass", which skips the filter rules. The rules log what
+        they block, so it shows as blocked flows in UniFi."""
         def rule(source, destination, which):
-            return {'enabled': '1', 'action': 'block', 'quick': '1', 'direction': 'in',
+            return {'enabled': '1', 'action': 'block', 'quick': '1', 'log': '1', 'direction': 'in',
                     'interface': '', 'ipprotocol': 'inet46', 'source_net': source,
                     'destination_net': destination, 'sequence': '1',
                     'description': '%s %s' % (REGION_DESCR, which)}
@@ -979,7 +980,7 @@ class Reconciler:
                 changes.append('Rule %r: add' % want['description'])
                 self._post('/api/firewall/filter/add_rule', {'rule': want})
             elif any((current.get(key) or '') != want[key] for key in
-                     ('action', 'interface', 'direction', 'source_net', 'destination_net', 'enabled')):
+                     ('action', 'interface', 'direction', 'source_net', 'destination_net', 'enabled', 'log')):
                 changes.append('Rule %r: update' % want['description'])
                 self._post('/api/firewall/filter/set_rule/' + current['uuid'], {'rule': want})
         if nat and not nats:

@@ -158,7 +158,7 @@ With `[apply] mode = apply` the daemon also works in the other direction. The co
 | A network's DHCP gateway, DNS servers, NTP servers and domain name | the Kea subnet's options |
 | Ad Blocking (CyberSecure) | an Unbound blocklist (AdGuard) for those networks |
 | Static routes (next hop or blackhole) | static routes, through a gateway with the next hop's address (added if missing) or Null4/Null6 |
-| Region Blocking (block) | a GeoIP alias of the countries, floating block rules, and a "no RDR" rule so port forwards are covered |
+| Region Blocking (block) | a GeoIP alias of the countries, floating block rules that log what they block (so it shows as blocked flows), and a "no RDR" rule so port forwards are covered |
 | Multicast DNS between networks | the os-mdns-repeater plugin's interfaces |
 | Dynamic DNS | os-ddclient accounts |
 
