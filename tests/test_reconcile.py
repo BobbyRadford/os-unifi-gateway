@@ -2,7 +2,8 @@ import copy
 
 import pytest
 
-from reconcile import OWNER_TAG, Intent, DhcpScope, Network, PortForward, Reconciler, intent_from_system_cfg
+from reconcile import (OWNER_TAG, DdnsAccount, DhcpScope, Intent, Network, PortForward, Reconciler,
+                       StaticRoute, intent_from_system_cfg)
 
 SUBNET_UUID = 'sub-1'
 
@@ -38,12 +39,18 @@ SYSTEM_CFG['udapi']['services']['dnsForwarder'] = {'hostRecords': [
 ]}
 
 
+class NotFound(Exception):
+    """What the API client raises for a 404, e.g. a plugin that isn't installed."""
+    status = 404
+
+
 class FakeOPNsense:
     """Answers the GETs the reconciler makes and records its POSTs."""
 
     def __init__(self):
         self.subnets = [{'uuid': SUBNET_UUID, 'subnet': '10.0.0.0/24',
-                         'pools': '10.0.0.100 - 10.0.0.254', 'valid_lifetime': ''}]
+                         'pools': '10.0.0.100 - 10.0.0.254', 'valid_lifetime': '',
+                         'option_data.routers': '10.0.0.1'}]
         self.reservations = []
         self.nat = []
         self.hosts = []
@@ -53,9 +60,24 @@ class FakeOPNsense:
                           'ipaddr': '10.0.0.1/24', 'enable': '1'}]
         self.vlans = []
         self.rules = []
+        self.dnsbl = []
+        self.routes = []
+        self.gateways = [{'uuid': 'gw-wan', 'name': 'WAN_DHCP', 'gateway': '203.0.113.1', 'ipprotocol': 'inet',
+                          'descr': 'Interface WAN_DHCP Gateway'}]
+        self.aliases = []
+        self.geoip_url = ''
+        self.mdns = None            # os-mdns-repeater settings when installed
+        self.ddns = None            # os-ddclient accounts when installed
         self.posts = []
 
     def get(self, path):
+        # plugins answer 404 until they are installed
+        plugins = {'/api/mdnsrepeater/settings/get': self.mdns and {'mdnsrepeater': self.mdns},
+                   '/api/dyndns/accounts/search_item': self.ddns is not None and {'rows': self.ddns}}
+        if path in plugins:
+            if not plugins[path]:
+                raise NotFound()
+            return plugins[path]
         general = {'valid_lifetime': self.lease,
                    'interfaces': {i: {'value': i.upper(), 'selected': 1} for i in self.kea_interfaces}}
         return {
@@ -67,6 +89,12 @@ class FakeOPNsense:
             '/api/kea/dhcpv4/get': {'dhcpv4': {'general': general}},
             '/api/firewall/d_nat/search_rule': {'rows': self.nat},
             '/api/unbound/settings/search_host_override': {'rows': self.hosts},
+            '/api/unbound/settings/search_dnsbl': {'rows': self.dnsbl},
+            '/api/routes/routes/search_route': {'rows': self.routes},
+            '/api/routing/settings/search_gateway': {'rows': self.gateways},
+            '/api/firewall/alias/get': {'alias': {'geoip': {'url': self.geoip_url}}},
+            '/api/firewall/alias/search_item': {'rows': self.aliases},
+            '/api/dyndns/settings/get': {'ddclient': {'general': {'enabled': '1'}}},
         }[path]
 
     def post(self, path, body=None):
@@ -97,7 +125,7 @@ def reservation(mac, ip, description='', uuid=None):
 def test_intent_from_captured_system_cfg():
     intent = intent_from_system_cfg(SYSTEM_CFG)
     assert intent.dhcp == [DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000,
-                                     {'00:00:5e:00:53:70': '10.0.0.112'})]
+                                     {'00:00:5e:00:53:70': '10.0.0.112'}, router='10.0.0.1')]
     # only the DNAT half of a port forward matters; its masquerade is UniFi's
     assert intent.port_forwards == [PortForward('plex', 'tcp', '32400', '10.0.0.50', '32400')]
     assert intent.dns_records == {('plex.internal', 'A'): '10.0.0.50'}
@@ -284,7 +312,8 @@ def test_new_network_is_built_in_order():
     assert posts['/api/kea/dhcpv4/set'] == {'dhcpv4': {'general': {'interfaces': 'lan,opt1'}}}
     subnet = posts['/api/kea/dhcpv4/add_subnet']['subnet4']
     assert subnet['pools'] == '10.0.99.100 - 10.0.99.200'
-    assert subnet['option_data'] == {'routers': '10.0.99.1', 'domain_name_servers': '10.0.99.1'}
+    assert subnet['option_data'] == {'routers': '10.0.99.1', 'domain_name_servers': '10.0.99.1',
+                                     'ntp_servers': '', 'domain_name': ''}
     block, allow = [body['rule'] for path, body in api.posts if path == '/api/firewall/filter/add_rule']
     # isolated: the other local networks are blocked ahead of the pass rule
     assert (block['action'], block['source_net'], block['destination_net']) == ('block', 'opt1', '10.0.0.0/24')
@@ -297,7 +326,8 @@ def test_built_network_changes_nothing():
     Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
     api.subnets.append({'uuid': 'sub-new', 'subnet': '10.0.99.0/24', 'pools': '10.0.99.100 - 10.0.99.200',
                         'valid_lifetime': '86400', 'description': OWNER_TAG + ' TEST99',
-                        'option_data.routers': '10.0.99.1', 'option_data.domain_name_servers': '10.0.99.1'})
+                        'option_data.routers': '10.0.99.1', 'option_data.domain_name_servers': '10.0.99.1',
+                        'option_data.ntp_servers': '', 'option_data.domain_name': ''})
     api.kea_interfaces = ['lan', 'opt1']
     api.rules = [dict(body['rule'], uuid='f%d' % i) for i, (path, body) in enumerate(api.posts)
                  if path == '/api/firewall/filter/add_rule']
@@ -384,3 +414,227 @@ def test_saved_changes_are_applied_when_a_later_step_fails():
     with pytest.raises(RuntimeError):
         Reconciler(api, 'apply').run(intent_from_system_cfg(VLAN_CFG))
     assert api.paths()[-1] == '/api/kea/service/reconfigure'
+
+
+# Shapes from the Network 10.6.109 controller's UXG config generator
+FEATURES_CFG = {'udapi': {
+    'interfaces': VLAN_CFG['udapi']['interfaces'],
+    'services': {
+        'dhcpServers': [{
+            'enabled': True, 'ipVersion': 'v4', 'gatewayAddress': '10.0.99.254', 'ipv4Netmask': 24,
+            'dnsServers': ['1.1.1.1', '9.9.9.9'], 'domain': 'lab.internal', 'leaseTime': 86400,
+            'name': 'net_TEST99_br99_10-0-99-0-24', 'rangeStart': '10.0.99.100', 'rangeStop': '10.0.99.200',
+            'options': [{'optionNumber': 42, 'value': '10.0.99.1,10.0.0.1'}, {'optionNumber': 2, 'value': '3600'}]}],
+        'utm': {'enabled': True, 'dnsFilter': [
+            {'adsFilter': True, 'dnsAddress': '203.0.113.1', 'netAddresses': ['10.0.99.1/24']},
+            {'dnsAddress': '185.228.168.168', 'netAddresses': ['10.0.0.1/24']}]},
+        'geoipFiltering': {'enabled': True, 'action': 'block', 'countryList': ['ru', 'CN'],
+                           'direction': 'both', 'interfaces': [{'id': 'eth0'}]},
+        'mdns': {'enabled': True, 'interfaces': [{'id': 'br0'}, {'id': 'br99'}], 'reflectFilter': []},
+        'ddns': {'enabled': True, 'clients': [
+            {'hostname': 'home.example.com', 'username': 'bob', 'password': 'pw', 'interface': {'id': 'eth0'},
+             'service': 'dyndns'},
+            {'hostname': 'www', 'username': 'example.com', 'password': 'pw2', 'interface': {'id': 'eth0'},
+             'service': 'custom', 'customName': 'namecheap.0', 'server': 'dynamicdns.park-your-domain.com'},
+            {'hostname': 'x.duckdns.org', 'username': 'emptyString', 'password': 'token',
+             'interface': {'id': 'eth0'}, 'service': 'duckdns'},
+            {'hostname': 'y.example.com', 'username': 'u', 'password': 'p', 'interface': {'id': 'eth0'},
+             'service': 'custom', 'server': 'example.com', 'customName': 'example.com'}]},
+    },
+    'routes/static': [
+        {'enabled': True, 'type': 'gateway', 'destination': '0.0.0.0/0', 'gateway': '203.0.113.1',
+         'distance': 1, 'table': 201, 'description': 'WAN_DEFAULT_GATEWAY:abc'},
+        {'enabled': True, 'type': 'gateway', 'destination': '192.168.5.0/24', 'gateway': '10.0.0.254',
+         'distance': 1, 'description': 'STATIC_ROUTE:r1'},
+        {'enabled': True, 'type': 'blackhole', 'destination': '198.51.100.0/24', 'distance': 1,
+         'description': 'STATIC_ROUTE:r2'},
+        {'enabled': True, 'type': 'interface', 'destination': '172.16.0.0/16', 'interface': 'wgsrv1',
+         'distance': 1, 'description': 'STATIC_ROUTE:r3'},
+    ],
+}}
+
+
+def test_features_from_system_cfg():
+    intent = intent_from_system_cfg(FEATURES_CFG)
+    scope = intent.dhcp[0]
+    assert (scope.router, scope.dns_servers, scope.domain, scope.ntp_servers) == (
+        '10.0.99.254', ['1.1.1.1', '9.9.9.9'], 'lab.internal', ['10.0.99.1', '10.0.0.1'])
+    # a dnsFilter entry without adsFilter is content filtering, not ad blocking
+    assert intent.ad_block == ['10.0.99.0/24']
+    assert intent.region_block == {'countries': ['CN', 'RU'], 'direction': 'both'}
+    assert intent.mdns == [0, 99]
+    # the controller's own routes and interface routes are left out
+    assert intent.static_routes == [StaticRoute('192.168.5.0/24', '10.0.0.254'), StaticRoute('198.51.100.0/24')]
+    assert intent.ddns == [DdnsAccount('dyndns2', 'home.example.com', 'bob', 'pw'),
+                           DdnsAccount('namecheap', 'www', 'example.com', 'pw2'),
+                           DdnsAccount('duckdns', 'x.duckdns.org', '', 'token')]
+
+
+def test_region_blocking_allow_action_is_skipped():
+    cfg = copy.deepcopy(FEATURES_CFG)
+    cfg['udapi']['services']['geoipFiltering']['action'] = 'allow'
+    assert intent_from_system_cfg(cfg).region_block == {}
+
+
+def test_managed_subnet_gets_unifis_dhcp_options():
+    api = FakeOPNsense()
+    Reconciler(api, 'apply').run(intent_from_system_cfg(FEATURES_CFG))
+    subnet = dict(api.posts)['/api/kea/dhcpv4/add_subnet']['subnet4']
+    assert subnet['option_data'] == {'routers': '10.0.99.254', 'domain_name_servers': '1.1.1.1,9.9.9.9',
+                                     'ntp_servers': '10.0.99.1,10.0.0.1', 'domain_name': 'lab.internal'}
+
+
+def test_hand_made_subnet_only_gets_options_unifi_sets():
+    api = FakeOPNsense()
+    api.subnets[0].update({'option_data_autocollect': '1', 'option_data.domain_name_servers': '10.0.0.1',
+                           'option_data.ntp_servers': '10.0.0.1', 'option_data.domain_name': ''})
+    scope = DhcpScope('10.0.0.0/24', '10.0.0.100', '10.0.0.254', 4000, router='10.0.0.1',
+                      dns_servers=['10.0.0.1'], domain='internal')
+    api.lease = '4000'
+    Reconciler(api, 'apply').run(Intent(dhcp=[scope]))
+    # the NTP server UniFi doesn't set is kept
+    assert api.posts[0] == ('/api/kea/dhcpv4/set_subnet/' + SUBNET_UUID, {'subnet4': {
+        'option_data_autocollect': '0',
+        'option_data': {'routers': '10.0.0.1', 'domain_name_servers': '10.0.0.1', 'domain_name': 'internal'}}})
+
+
+def test_ad_blocking_is_one_blocklist():
+    api = FakeOPNsense()
+    api.dnsbl = [{'uuid': 'b0', 'description': 'hand made', 'enabled': '1'}]
+    Reconciler(api, 'apply').run(Intent(ad_block=['10.0.40.0/24', '10.0.99.0/24']))
+    assert api.posts == [
+        ('/api/unbound/settings/add_dnsbl', {'blocklist': {
+            'enabled': '1', 'type': 'ag', 'source_nets': '10.0.40.0/24,10.0.99.0/24',
+            'description': OWNER_TAG + ' Ad blocking for 10.0.40.0/24, 10.0.99.0/24'}}),
+        ('/api/unbound/service/dnsbl', {}),
+    ]
+    api.dnsbl.append({'uuid': 'b1', 'enabled': '1', 'description': api.posts[0][1]['blocklist']['description']})
+    api.posts = []
+    assert Reconciler(api, 'apply').run(Intent(ad_block=['10.0.40.0/24', '10.0.99.0/24'])) == []
+    Reconciler(api, 'apply').run(Intent())
+    assert api.paths() == ['/api/unbound/settings/del_dnsbl/b1', '/api/unbound/service/dnsbl']
+
+
+def test_static_routes_find_or_add_their_gateway():
+    api = FakeOPNsense()
+    routes = [StaticRoute('192.168.5.0/24', '10.0.0.254'), StaticRoute('198.51.100.0/24'),
+              StaticRoute('192.168.6.0/24', '203.0.113.1'), StaticRoute('192.168.7.0/24', '172.16.0.1')]
+    Reconciler(api, 'apply').run(Intent(static_routes=routes))
+    assert api.paths() == [
+        '/api/routing/settings/add_gateway',
+        '/api/routing/settings/reconfigure',
+        '/api/routes/routes/add_route',
+        '/api/routes/routes/add_route',
+        '/api/routes/routes/add_route',
+        '/api/routes/routes/reconfigure',
+    ]
+    assert api.posts[0][1]['gateway_item']['name'] == 'UNIFI_10_0_0_254'
+    assert api.posts[0][1]['gateway_item']['interface'] == 'lan'
+    added = {body['route']['network']: body['route']['gateway'] for path, body in api.posts
+             if path.endswith('add_route')}
+    # 172.16.0.1 is on no interface, so its route is skipped
+    assert added == {'192.168.5.0/24': 'UNIFI_10_0_0_254', '198.51.100.0/24': 'Null4',
+                     '192.168.6.0/24': 'WAN_DHCP'}
+
+
+def test_removed_static_route_takes_its_gateway_along():
+    api = FakeOPNsense()
+    api.gateways.append({'uuid': 'gw1', 'name': 'UNIFI_10_0_0_254', 'gateway': '10.0.0.254',
+                         'ipprotocol': 'inet', 'descr': OWNER_TAG + ' next hop'})
+    api.routes = [{'uuid': 'rt1', 'network': '192.168.5.0/24', 'gateway': 'UNIFI_10_0_0_254', 'enabled': '1',
+                   'descr': OWNER_TAG + ' static route from UniFi'},
+                  {'uuid': 'rt2', 'network': '192.168.8.0/24', 'gateway': 'WAN_DHCP', 'enabled': '1',
+                   'descr': 'hand made'}]
+    Reconciler(api, 'apply').run(Intent())
+    assert api.paths() == ['/api/routes/routes/del_route/rt1', '/api/routing/settings/del_gateway/gw1',
+                           '/api/routing/settings/reconfigure', '/api/routes/routes/reconfigure']
+
+
+def test_plugins_that_are_missing_are_skipped():
+    api = FakeOPNsense()
+    intent = Intent(mdns=[0, 99], ddns=[DdnsAccount('dyndns2', 'home.example.com', 'bob', 'pw')])
+    assert Reconciler(api, 'apply').run(intent) == []
+    assert api.posts == []
+
+
+def test_mdns_repeater_follows_unifi():
+    api = FakeOPNsense()
+    api.mdns = {'enabled': '0', 'interfaces': {'lan': {'value': 'LAN', 'selected': 1},
+                                               'opt1': {'value': 'TEST99', 'selected': 0}}}
+    Reconciler(api, 'apply').run(intent_from_system_cfg(FEATURES_CFG))
+    assert dict(api.posts)['/api/mdnsrepeater/settings/set'] == {
+        'mdnsrepeater': {'enabled': '1', 'interfaces': 'lan,opt1'}}
+    assert '/api/mdnsrepeater/service/reconfigure' in api.paths()
+    # one network has nothing to repeat to
+    api = FakeOPNsense()
+    api.mdns = {'enabled': '1', 'interfaces': 'lan,opt1'}
+    Reconciler(api, 'apply').run(Intent(mdns=[0]))
+    assert api.posts == [('/api/mdnsrepeater/settings/set', {'mdnsrepeater': {'enabled': '0'}}),
+                         ('/api/mdnsrepeater/service/reconfigure', {})]
+
+
+def test_ddns_accounts_follow_unifi():
+    api = FakeOPNsense()
+    api.ddns = [{'uuid': 'd0', 'description': 'hand made', 'enabled': '1'}]
+    account = DdnsAccount('dyndns2', 'home.example.com', 'bob', 'pw')
+    Reconciler(api, 'apply').run(Intent(ddns=[account]))
+    path, body = api.posts[0]
+    assert path == '/api/dyndns/accounts/add_item'
+    assert body['account']['description'].startswith(OWNER_TAG + ' DDNS dyndns2 home.example.com #')
+    assert (body['account']['username'], body['account']['password']) == ('bob', 'pw')
+    assert api.paths()[-1] == '/api/dyndns/service/reconfigure'
+
+    api.ddns.append(dict(body['account'], uuid='d1'))
+    api.posts = []
+    assert Reconciler(api, 'apply').run(Intent(ddns=[account])) == []
+    # a new password changes the description's hash
+    Reconciler(api, 'apply').run(Intent(ddns=[DdnsAccount('dyndns2', 'home.example.com', 'bob', 'new')]))
+    assert api.paths() == ['/api/dyndns/accounts/set_item/d1', '/api/dyndns/service/reconfigure']
+    api.posts = []
+    Reconciler(api, 'apply').run(Intent())
+    assert api.paths() == ['/api/dyndns/accounts/del_item/d1', '/api/dyndns/service/reconfigure']
+
+
+def test_region_blocking_needs_a_geoip_source():
+    api = FakeOPNsense()
+    assert Reconciler(api, 'apply').run(Intent(region_block={'countries': ['CN'], 'direction': 'both'})) == []
+    assert api.posts == []
+
+
+def test_region_blocking_builds_alias_then_rules():
+    api = FakeOPNsense()
+    api.geoip_url = 'https://download.maxmind.com/geoip/databases/GeoLite2-Country-CSV/download?suffix=zip'
+    Reconciler(api, 'apply').run(intent_from_system_cfg(FEATURES_CFG))
+    region = [(path, body) for path, body in api.posts
+              if '/alias/' in path or 'Region' in str(body) or path.endswith('/filter/apply')]
+    assert [path for path, _ in region] == [
+        '/api/firewall/alias/add_item',
+        '/api/firewall/filter/add_rule',
+        '/api/firewall/filter/add_rule',
+        '/api/firewall/d_nat/add_rule',
+        '/api/firewall/filter/apply',
+        '/api/firewall/alias/reconfigure',
+    ]
+    alias = region[0][1]['alias']
+    assert (alias['type'], alias['content']) == ('geoip', 'CN\nRU')
+    incoming, outgoing = region[1][1]['rule'], region[2][1]['rule']
+    assert (incoming['interface'], incoming['source_net'], incoming['destination_net']) == ('', 'unifi_region_block', 'any')
+    assert (outgoing['source_net'], outgoing['destination_net']) == ('any', 'unifi_region_block')
+    nat = region[3][1]['rule']
+    assert (nat['nordr'], nat['source']['network']) == ('1', 'unifi_region_block')
+
+
+def test_region_blocking_off_removes_it_and_port_forwards_keep_its_nat_rule():
+    api = FakeOPNsense()
+    api.geoip_url = 'https://example.com/geoip.zip'
+    api.aliases = [{'uuid': 'a1', 'name': 'unifi_region_block', 'content': 'CN,RU', 'enabled': '1',
+                    'description': OWNER_TAG + ' Region blocking'}]
+    api.rules = [{'uuid': 'f1', 'description': OWNER_TAG + ' Region blocking incoming'}]
+    api.nat = [{'uuid': 'n1', 'descr': OWNER_TAG + ' Region blocking of port forwards', 'nordr': '1'}]
+    region = {'countries': ['CN', 'RU'], 'direction': 'incoming'}
+    api.rules[0].update(Reconciler._region_rules('incoming')[0]['incoming'])
+    assert Reconciler(api, 'apply').run(Intent(region_block=region)) == []
+    Reconciler(api, 'apply').run(Intent())
+    assert api.paths() == ['/api/firewall/d_nat/del_rule/n1', '/api/firewall/filter/del_rule/f1',
+                           '/api/firewall/alias/del_item/a1', '/api/firewall/alias/reconfigure',
+                           '/api/firewall/filter/apply']

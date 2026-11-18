@@ -36,6 +36,8 @@ LIVE_INFORM_INTERVAL = 2
 USG2_PING_TEST = 1
 # usg_caps bit 29 makes the controller read the inform's `triggers`
 USG_TRIGGER_LOGS = 0x20000000
+# usg_caps bit 6 makes it send region blocking (services.geoipFiltering)
+USG_GEOIP_FILTERING = 0x40
 
 
 def encode_inform(config, data, encryption='CBC'):
@@ -257,7 +259,10 @@ def _uxg_fields(dc, ports, uptime=0):
         # v4 makes it send the UI's DNS records (services.dnsForwarder
         # .hostRecords); v7 changes how it writes the gateway's own records,
         # and other paths switch whole output formats, so add only what's used.
-        'udapi_version': {'version': 48, 'versionDetail': {'services/dnsForwarder': 4}},
+        # utm v2 offers Ad Blocking in the UI and sends it as per-network
+        # services.utm.dnsFilter entries (v5 switches to content filtering
+        # rules, dnsResolvRules).
+        'udapi_version': {'version': 48, 'versionDetail': {'services/dnsForwarder': 4, 'services/utm': 2}},
         'udapi_caps': 0,
         'usg2_caps': USG2_LIVE_UPDATE | USG2_PING_TEST,
         'inform_min_interval': LIVE_INFORM_INTERVAL,
@@ -334,7 +339,7 @@ def _complete_payload(config, dc, device):
         'has_default_route_distance': True,
         'has_eth1': True,
         'has_ssh_disable': True,
-        'usg_caps': USG_TRIGGER_LOGS,
+        'usg_caps': USG_TRIGGER_LOGS | USG_GEOIP_FILTERING,
         'hostname': hostname,
         'inform_url': config.get('gateway', 'url'),
         'inform_ip': _inform_ip(config.get('gateway', 'url')),
