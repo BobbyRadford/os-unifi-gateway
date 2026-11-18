@@ -1,0 +1,888 @@
+{
+"5": {
+"name": "DingTalk",
+"domains": [
+"dingtalk.com"
+]
+},
+"6": {
+"name": "IRC",
+"domains": [
+"irc.ircnet.com",
+"irc.libera.chat",
+"irc.oftc.net",
+"irc.undernet.org"
+]
+},
+"22": {
+"name": "Paltalk",
+"domains": [
+"paltalk.com",
+"paltalkconnect.com"
+]
+},
+"39": {
+"name": "Slack",
+"domains": [
+"slack-core.com",
+"slack-edge.com",
+"slack-files.com",
+"slack-imgs.com",
+"slack-msgs.com",
+"slack-redir.net",
+"slack.com",
+"slackb.com"
+]
+},
+"40": {
+"name": "Telegram",
+"domains": [
+"cdn-telegram.org",
+"t.me",
+"tdesktop.com",
+"telegram.me",
+"tupdate.com",
+"web.telegram.org"
+]
+},
+"41": {
+"name": "WhatsApp",
+"domains": [
+"cdn.whatsapp.net",
+"chat-e2ee-mini.facebook.com",
+"fna.whatsapp.net",
+"mmg-fna.whatsapp.net",
+"mms.whatsapp.net",
+"whatsapp.com",
+"whatsapp.net"
+]
+},
+"70": {
+"name": "GoogleChat",
+"domains": [
+"chat.google.com"
+]
+},
+"106": {
+"name": "WeChat",
+"domains": [
+"mmsns.qpic.cn",
+"we.chat",
+"wechat.com",
+"wechat.org",
+"wechatapp.com",
+"weixin.com"
+]
+},
+"107": {
+"name": "Snapchat",
+"domains": [
+"addlive.io",
+"api.snapchat.com",
+"cognac-prod.appspot.com",
+"feelinsonice-hrd.appspot.com",
+"feelinsonice.appspot.com",
+"feelinsonice.com",
+"sc-analytics.appspot.com",
+"sc-cdn.net",
+"sc-jpl.com",
+"sc-prod.net",
+"sc-static.net",
+"snap.api.mapbox.com",
+"snapads.com",
+"snapchat.com"
+]
+},
+"127": {
+"name": "FacebookMessenger",
+"domains": [
+"edge-mqtt.facebook.com",
+"m.me",
+"messenger.com",
+"mqtt-mini.facebook.com"
+]
+},
+"196623": {
+"name": "GoogleDrive",
+"domains": [
+"drive-thirdparty.googleusercontent.com",
+"drive.google.com",
+"drivefrontend-pa.googleapis.com"
+]
+},
+"196738": {
+"name": "SoundCloud",
+"domains": [
+"getrockerbox.com",
+"sndcdn.com",
+"soundcloud.com"
+]
+},
+"196758": {
+"name": "AppleiCloud",
+"domains": [
+"icloud-content.com",
+"icloud.com",
+"me.com"
+]
+},
+"196763": {
+"name": "YandexDisk",
+"domains": [
+"disk.yandex"
+]
+},
+"262154": {
+"name": "AppleiTunes",
+"domains": [
+"inappcheck.itunes.apple.com",
+"itunes.apple.com",
+"tlnk.io"
+]
+},
+"262157": {
+"name": "iQIYI",
+"domains": [
+"iq.com",
+"iqiyi.com",
+"iqiyipic.com",
+"pps.tv",
+"qy.net"
+]
+},
+"262163": {
+"name": "Twitch",
+"domains": [
+"jtvnw.net",
+"live-video.net",
+"ttvnw.net",
+"twitch.tv",
+"twitchcdn.net",
+"twitchsvc.net"
+]
+},
+"262176": {
+"name": "Dailymotion",
+"domains": [
+"dai.ly",
+"dailymotion.com",
+"dailymotionadvertising.com",
+"dmcdn.net",
+"dmxleo.com"
+]
+},
+"262179": {
+"name": "Hulu",
+"domains": [
+"assetshuluimcom-a.akamaihd.net",
+"hulu.com",
+"huluad.com",
+"huluim.com",
+"hulustream.com",
+"ibhuluimcom-a.akamaihd.net"
+]
+},
+"262225": {
+"name": "DirecTV",
+"domains": [
+"directv.com",
+"directvnow.com",
+"dtvbb.tv",
+"dtvce.com"
+]
+},
+"262245": {
+"name": "Pandora",
+"domains": [
+"pandora.com"
+]
+},
+"262246": {
+"name": "Deezer",
+"domains": [
+"deezer.com"
+]
+},
+"262256": {
+"name": "YouTube",
+"domains": [
+"googlevideo.com",
+"kids.youtube.com",
+"upload.video.google.com",
+"upload.youtube.com",
+"youtu.be",
+"youtube-nocookie.com",
+"youtube-ui.l.google.com",
+"youtube.com",
+"youtubeeducation.com",
+"youtubei.googleapis.com",
+"yt3.ggpht.com",
+"ytimg.com"
+]
+},
+"262268": {
+"name": "Vudu",
+"domains": [
+"vudu.com"
+]
+},
+"262274": {
+"name": "Spotify",
+"domains": [
+"audio-ak-spotify-com.akamaized.net",
+"audio4-ak-spotify-com.akamaized.net",
+"heads-ak-spotify-com.akamaized.net",
+"pscdn.co",
+"scdn.co",
+"spotify-com.akamaized.net",
+"spotify.com",
+"spotify.com.edgesuite.net",
+"spotify.demdex.net",
+"spotify.edgekey.net",
+"spotify.map.fastly.net",
+"spotifycdn.com",
+"spotifycdn.net",
+"spotilocal.com"
+]
+},
+"262275": {
+"name": "LastFM",
+"domains": [
+"last.fm"
+]
+},
+"262276": {
+"name": "NetFlix",
+"domains": [
+"fast.com",
+"netflix.com",
+"nflxext.com",
+"nflximg.com",
+"nflximg.net",
+"nflxso.net",
+"nflxvideo.net"
+]
+},
+"262295": {
+"name": "Livestream",
+"domains": [
+"livestream.com"
+]
+},
+"262300": {
+"name": "HBO",
+"domains": [
+"discomax.com",
+"h264.io",
+"hbo.com",
+"hbogo.co.th",
+"hbogo.com",
+"hbogo.eu",
+"hbogoasia.com",
+"hbogoasia.id",
+"hbogoasia.ph",
+"hbomax.com",
+"hbomaxcdn.com",
+"hbonow.com",
+"max.com",
+"maxgo.com"
+]
+},
+"262306": {
+"name": "TuneIn",
+"domains": [
+"radiotime.com",
+"tunein.com",
+"tunenet.io"
+]
+},
+"262337": {
+"name": "AmazonVideo",
+"domains": [
+"1s3.lvlt.dash.us.aiv-cdn.net.c.footprint.net",
+"aiv-cdn.net",
+"aiv-delivery.net",
+"amazonvideo.com",
+"atv-ext.amazon.com",
+"atv-ps.amazon.com",
+"d25xi40x97liuc.cloudfront.net",
+"dmqdd6hw24ucf.cloudfront.net",
+"primevideo.com",
+"pv-cdn.net",
+"s.loris.llnwd.net"
+]
+},
+"262341": {
+"name": "Vimeo",
+"domains": [
+"vimeo.com",
+"vimeocdn.com"
+]
+},
+"262392": {
+"name": "TikTok",
+"domains": [
+"bytecdn.cn",
+"byted.org",
+"byteicdn.com",
+"byteoversea.com",
+"ibyteimg.com",
+"muscdn.com",
+"musemuse.cn",
+"musical.ly",
+"p16-tiktok-va-h2.ibyteimg.com",
+"p16-tiktokcdn-com.akamaized.net",
+"p16-va-default.akamaized.net",
+"tik-tokcdn.com",
+"tiktok.com",
+"tiktokcdn-eu.com",
+"tiktokcdn-us.com",
+"tiktokcdn.com",
+"tiktokcdn.liveplay.myqcloud.com",
+"tiktokv.com",
+"tiktokv.eu",
+"tiktokv.us"
+]
+},
+"262418": {
+"name": "AppleTVPlus",
+"domains": [
+"tv.apple.com",
+"tv.g.apple.com",
+"tv.v.aaplimg.com"
+]
+},
+"327714": {
+"name": "YandexMail",
+"domains": [
+"mail.yandex"
+]
+},
+"327774": {
+"name": "Outlook",
+"domains": [
+"hotmail.com"
+]
+},
+"327775": {
+"name": "GMail",
+"domains": [
+"gmail.com",
+"inbox.google.com",
+"mail.google"
+]
+},
+"393234": {
+"name": "Line",
+"domains": [
+"line-apps.com",
+"line-scdn.net",
+"line-website.com",
+"line.me",
+"line.naver.jp",
+"linecorp.com"
+]
+},
+"393238": {
+"name": "Viber",
+"domains": [
+"cdn.viber.com",
+"viber.com",
+"viber.it"
+]
+},
+"393249": {
+"name": "Discord",
+"domains": [
+"discord.com",
+"discord.gg",
+"discord.media",
+"discordapp.com",
+"discordapp.net"
+]
+},
+"393253": {
+"name": "Teams",
+"domains": [
+"secure.skypeassets.com",
+"teams-ring.msedge.net",
+"teams.live.com"
+]
+},
+"458767": {
+"name": "Salesforce",
+"domains": [
+"force.com",
+"marketingcloudapis.com",
+"salesforce.com",
+"salesforceliveagent.com"
+]
+},
+"524343": {
+"name": "ElectronicArts",
+"domains": [
+"ea.com",
+"origin-a.akamaihd.net"
+]
+},
+"524350": {
+"name": "Xbox",
+"domains": [
+"xbox.com",
+"xboxab.com",
+"xboxlive.com",
+"xboxlive.com.akadns.net",
+"xboxlive.com.c.footprint.net",
+"xboxservices.com"
+]
+},
+"524370": {
+"name": "RockstarGames",
+"domains": [
+"gamedownloads-rockstargames-com.akamaized.net",
+"rockstargames.com",
+"rsg.sc"
+]
+},
+"524399": {
+"name": "Steam",
+"domains": [
+"steamcommunity-a.akamaihd.net",
+"steamcommunity.com",
+"steamcontent.com",
+"steampowered.com",
+"steamserver.net",
+"steamstatic.com"
+]
+},
+"524430": {
+"name": "Playstation",
+"domains": [
+"e13555.b.akamaiedge.net",
+"e1800.d.akamaiedge.net",
+"e1879.e7.akamaiedge.net",
+"playstation.com",
+"playstation.net",
+"sonyentertainmentnetwork.com",
+"wbagora.com",
+"wbplay.com"
+]
+},
+"524450": {
+"name": "Nexon",
+"domains": [
+"nexon.com",
+"nexon.io",
+"nexoncdn.co.kr",
+"nxm-maplemgl-staticweb.s3.amazonaws.com"
+]
+},
+"524564": {
+"name": "NetEaseGames",
+"domains": [
+"easebar.com"
+]
+},
+"524567": {
+"name": "EpicGames",
+"domains": [
+"epicgames.com",
+"epicgames.dev",
+"epicgames.net",
+"fortnite-vod.akamaized.net",
+"fortnite.com",
+"unrealengine.com"
+]
+},
+"524649": {
+"name": "Nintendo",
+"domains": [
+"nintendo.com",
+"nintendo.net"
+]
+},
+"525043": {
+"name": "GeForceNow",
+"domains": [
+"dtrace.nvidia.com",
+"geforce.com",
+"geforcenow.com",
+"gfe.nvidia.com",
+"gx.nvidia.com",
+"kaizen.nvidia.com",
+"nvgs.nvidia.com",
+"nvidiagrid.net",
+"userstore.nvidia.com"
+]
+},
+"655397": {
+"name": "AnyDesk",
+"domains": [
+"net.anydesk.com"
+]
+},
+"720911": {
+"name": "Hamachi",
+"domains": [
+"secure.logmein.com"
+]
+},
+"720961": {
+"name": "HotspotShield",
+"domains": [
+"anchorfree.com",
+"hotspotshield.com",
+"northghost.com"
+]
+},
+"721010": {
+"name": "NordVPN",
+"domains": [
+"napps-1.com",
+"napps-2.com",
+"nordaccount.com",
+"nordcdn.com",
+"nordsec.com",
+"nordvpn.com"
+]
+},
+"721014": {
+"name": "OperaVPN",
+"domains": [
+"sec-tunnel.com"
+]
+},
+"786456": {
+"name": "Bloomberg",
+"domains": [
+"bloomberg.com",
+"bloombergvault.com"
+]
+},
+"851975": {
+"name": "Ookla",
+"domains": [
+"cdnst.net",
+"ooklaserver.net",
+"speedtest.com"
+]
+},
+"851983": {
+"name": "Google",
+"domains": [
+"1e100.net",
+"2mdn.net",
+"adservice.google.com",
+"ampproject.net",
+"ampproject.org",
+"app-measurement.com",
+"connectivitycheck.android.com",
+"connectivitycheck.gstatic.com",
+"dmtry.com",
+"doubleclick.net",
+"ggpht.com",
+"google-analytics.com",
+"googleads.com",
+"googleadservices.com",
+"googleapis.com",
+"googlesyndication.com",
+"googletagmanager.com",
+"googletagservices.com",
+"googleusercontent.com",
+"googlezip.net",
+"gstatic.com",
+"gvt1.com",
+"gvt2.com",
+"mtalk.google.com",
+"telephony.goog"
+]
+},
+"851985": {
+"name": "eBay",
+"domains": [
+"ebay.com",
+"ebaydesc.com",
+"ebayimg.com",
+"ebayrtm.com",
+"ebaystatic.com",
+"ebaystratus.com"
+]
+},
+"852003": {
+"name": "Espn",
+"domains": [
+"espn.api.edge.bamgrid.com",
+"espn.com",
+"espn.connections.edge.bamgrid.com",
+"espn.net",
+"espn.playback.edge.bamgrid.com",
+"espncdn.com",
+"fn-pz.com"
+]
+},
+"852037": {
+"name": "Microsoft",
+"domains": [
+"appcenter.ms",
+"img-s-msn-com.akamaized.net",
+"img.s-msn.com",
+"microsoft.com",
+"microsoftapp.net",
+"msedge.net",
+"msftconnecttest.com",
+"msftstatic.com",
+"msn.com",
+"msocdn.com",
+"onmicrosoft.com",
+"prod-streaming-video-msn-com.akamaized.net",
+"s-microsoft.com"
+]
+},
+"852052": {
+"name": "Apple",
+"domains": [
+"aaplimg.com",
+"apple-cloudkit.com",
+"apple-dns.net",
+"apple.com",
+"apple.news",
+"attwifi.apple.com",
+"captive.apple.com",
+"cdn-apple.com",
+"e6858.dsce9.akamaiedge.net",
+"gc-apple.com",
+"gsp1.apple.com",
+"ls-apple.com",
+"ls4-apple.com",
+"mzstatic.com",
+"origin-apple.com.akadns.net",
+"tether.edge.apple"
+]
+},
+"852128": {
+"name": "AppleStore",
+"domains": [
+"buy.itunes.apple.com",
+"iosapps.itunes.apple.com",
+"itunes-apple.com",
+"myapp.itunes.apple.com",
+"osxapps.itunes.apple.com",
+"se.itunes.apple.com",
+"su.itunes.apple.com",
+"swscan.apple.com"
+]
+},
+"852131": {
+"name": "GoogleDocs",
+"domains": [
+"docs.google.com",
+"docs.googleusercontent.com"
+]
+},
+"852133": {
+"name": "Naver",
+"domains": [
+"naver.com",
+"naver.net",
+"navercorp.com",
+"ncloud.com",
+"pstatic.net"
+]
+},
+"852200": {
+"name": "Wikipedia",
+"domains": [
+"mediawiki.com",
+"wikimedia.com",
+"wikimediafoundation.com",
+"wikipedia.com"
+]
+},
+"852202": {
+"name": "Amazon",
+"domains": [
+"a2z.com",
+"amazon.com",
+"images-amazon.com",
+"media-amazon.com",
+"ssl-images-amazon.com"
+]
+},
+"852214": {
+"name": "Yahoo",
+"domains": [
+"ads.yahoo.com",
+"yads.yahoo.com",
+"yads.yjtag.yahoo.co.jp",
+"yahoo.co.jp",
+"yahoo.com",
+"yahoo.net",
+"yahooapis.com",
+"yimg.com",
+"yimg.jp"
+]
+},
+"852215": {
+"name": "Taobao",
+"domains": [
+"taobao.com",
+"tmall.com"
+]
+},
+"852236": {
+"name": "Shein",
+"domains": [
+"ltwebstatic.com",
+"shein.com"
+]
+},
+"917513": {
+"name": "WindowsUpdate",
+"domains": [
+"cs9.wac.phicdn.net",
+"delivery.dsp.mp.microsoft.com.nsatc.net",
+"delivery.mp.microsoft.com",
+"dl.delivery.mp.microsoft.com",
+"emdl.ws.microsoft.com",
+"fe2.update.microsoft.com",
+"fe3.update.microsoft.com",
+"geo-prod.do.dsp.mp.microsoft.com",
+"mp.microsoft.com",
+"ntservicepack.microsoft.com",
+"prod.do.dsp.mp.microsoft.com",
+"sls.update.microsoft.com",
+"slscr.update.microsoft.com",
+"update.microsoft.com",
+"update.microsoft.com.akadns.net",
+"wac.phicdn.net",
+"windowsupdate.com",
+"wustat.windows.com"
+]
+},
+"1114124": {
+"name": "Webex",
+"domains": [
+"webex.com",
+"webexcontent.com"
+]
+},
+"1114174": {
+"name": "Zoom",
+"domains": [
+"zoom.us"
+]
+},
+"1114179": {
+"name": "AdobeConnect",
+"domains": [
+"adobeconnect.com"
+]
+},
+"1114185": {
+"name": "Fuze",
+"domains": [
+"fuze.com",
+"fuzemeeting.com",
+"thinkingphones.com"
+]
+},
+"1114366": {
+"name": "Microsoft365",
+"domains": [
+"bing.com"
+]
+},
+"1114402": {
+"name": "GoogleMeet",
+"domains": [
+"meet.google.com"
+]
+},
+"1572867": {
+"name": "Facebook",
+"domains": [
+"facebook.com",
+"facebook.net",
+"fb.com",
+"fb.gg",
+"fbcdn.net",
+"fbsbx.com",
+"fbstatic-a.akamaihd.net",
+"fbwat.ch"
+]
+},
+"1572872": {
+"name": "LinkedIn",
+"domains": [
+"licdn.com",
+"linkedin.com"
+]
+},
+"1572881": {
+"name": "Pinterest",
+"domains": [
+"pinimg.com",
+"pinterest.co",
+"pinterest.com",
+"pinterest.global.map.fastly.net",
+"pinterest.map.fastly.net"
+]
+},
+"1572882": {
+"name": "Tumblr",
+"domains": [
+"tumblr.com"
+]
+},
+"1572893": {
+"name": "Badoo",
+"domains": [
+"badoo.app",
+"badoo.com",
+"badoocdn.com"
+]
+},
+"1573013": {
+"name": "Reddit",
+"domains": [
+"redd.it",
+"reddit.com",
+"reddit.map.fastly.net",
+"redditmedia.com",
+"redditstatic.com"
+]
+},
+"1573022": {
+"name": "Instagram",
+"domains": [
+"cdninstagram.com",
+"instagram.com"
+]
+},
+"1573079": {
+"name": "Waze",
+"domains": [
+"waze.com",
+"wazespeechactiviation-pa.googleapis.com"
+]
+},
+"1573185": {
+"name": "Threads",
+"domains": [
+"threads.net"
+]
+},
+"2359352": {
+"name": "AccuWeather",
+"domains": [
+"accuweather.com"
+]
+},
+"2687059": {
+"name": "Temu",
+"domains": [
+"kwcdn.com",
+"temu.com"
+]
+}
+}

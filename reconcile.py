@@ -16,6 +16,10 @@ until it matches:
 - Port forwards (Destination NAT), each with its own pass rule.
 - DNS records from the UI's DNS page (A and AAAA), as Unbound host overrides.
 - Ad blocking, as an Unbound blocklist for the networks that have it.
+- App blocking (traffic rules that block an app or a category of apps), as
+  an Unbound blocklist of the apps' domains for the rule's source networks.
+  OPNsense can't match traffic by app, so this blocks the DNS lookups.
+  app_domains.json lists the domains (see dev/make_app_domains.py).
 - Static routes, through an existing gateway with the next hop's address or
   one the reconciler adds.
 - Region blocking, as a GeoIP alias and floating block rules. OPNsense needs
@@ -37,6 +41,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -56,6 +61,10 @@ PROTOCOLS = {'tcp': 'tcp', 'udp': 'udp', 'tcp_udp': 'tcp/udp', 'tcp/udp': 'tcp/u
 
 # The Unbound blocklist used for UniFi's ad blocking (AdGuard's DNS filter)
 AD_BLOCKLISTS = 'ag'
+
+# Domains to block for each UniFi app ID ((category << 16) | app), from nDPI
+with open(os.path.join(os.path.dirname(__file__), 'app_domains.json')) as _f:
+    APP_DOMAINS = json.load(_f)
 
 # Region blocking: the GeoIP alias and the descriptions of its rules
 REGION_ALIAS = 'unifi_region_block'
@@ -126,12 +135,21 @@ class DdnsAccount:
 
 
 @dataclass
+class AppBlock:
+    """A traffic rule blocking apps, as the domains to block."""
+    names: list                         # app names, for the description
+    domains: list
+    subnets: list = field(default_factory=list)         # empty for every client
+
+
+@dataclass
 class Intent:
     networks: list = field(default_factory=list)
     dhcp: list = field(default_factory=list)
     port_forwards: list = field(default_factory=list)
     dns_records: dict = field(default_factory=dict)    # {(fqdn, 'A'|'AAAA'): address}
     ad_block: list = field(default_factory=list)       # subnets: ["10.0.40.0/24"]
+    app_block: list = field(default_factory=list)      # AppBlock per traffic rule
     static_routes: list = field(default_factory=list)
     region_block: dict = field(default_factory=dict)   # {'countries': [...], 'direction': ...}
     mdns: list = None                   # VLANs to repeat mDNS between (0 is the LAN), None when off
@@ -219,6 +237,7 @@ def intent_from_system_cfg(cfg):
                 except ValueError:
                     pass
     intent.ad_block = sorted(ad_block)
+    intent.app_block = _app_blocks(udapi)
 
     # User routes are described STATIC_ROUTE:<id>. The controller adds its own
     # (WAN default gateways, VPNs) to the same list.
@@ -253,6 +272,48 @@ def intent_from_system_cfg(cfg):
     if ddns.get('enabled'):
         intent.ddns = _ddns_from(ddns.get('clients', []))
     return intent
+
+
+def _app_blocks(udapi):
+    """UniFi traffic rules that block apps. The controller sends each as a
+    filter rule per IP version with `applicationId` (or only `categoryId`
+    for a whole category), a source address set and the rule's ID in
+    `triggerTag`. A rule without a source covers every client."""
+    sets = {s['identification']['name']: s.get('entries', []) for s in udapi.get('firewall/sets', [])}
+    rules = {}
+    for chain in udapi.get('firewall/filter', []):
+        for rule in chain.get('rules', []):
+            tag = rule.get('triggerTag') or {}
+            if (tag.get('type') != 'TRAFFIC_RULE' or rule.get('target') not in ('DROP', 'REJECT')
+                    or 'categoryId' not in rule):
+                continue
+            entry = rules.setdefault(tag.get('id'), {'apps': set(), 'subnets': set(), 'sourced': False})
+            app = rule.get('applicationId')
+            if app is None:
+                entry['apps'].update(int(key) for key in APP_DOMAINS if int(key) >> 16 == rule['categoryId'])
+            else:
+                entry['apps'].update((rule['categoryId'] << 16) | a for a in (app if isinstance(app, list) else [app]))
+            source = rule.get('source') or {}
+            if set(source) - {'sets'}:
+                logger.warning('Skipping app blocking rule %s: its source (%s) is not supported',
+                               tag.get('id'), ', '.join(sorted(source)))
+                entry['skip'] = True
+            for name in source.get('sets', []):
+                entry['sourced'] = True
+                entry['subnets'].update(sets.get(name, []))
+    blocks = []
+    for rule_id, entry in sorted(rules.items()):
+        if entry.get('skip') or (entry['sourced'] and not entry['subnets']):
+            continue
+        apps = [APP_DOMAINS[str(a)] for a in sorted(entry['apps']) if str(a) in APP_DOMAINS]
+        if len(apps) < len(entry['apps']):
+            logger.warning('App blocking rule %s: %d of its apps have no known domains and are not blocked',
+                           rule_id, len(entry['apps']) - len(apps))
+        if apps:
+            blocks.append(AppBlock(names=sorted({a['name'] for a in apps}),
+                                   domains=sorted({d for a in apps for d in a['domains']}),
+                                   subnets=sorted(entry['subnets'])))
+    return blocks
 
 
 def _bridge_vlans(udapi):
@@ -372,6 +433,7 @@ class Reconciler:
                 (lambda: self._port_forwards(intent.port_forwards, changes), ('/api/firewall/d_nat/apply',)),
                 (lambda: self._dns_records(intent.dns_records, changes), ('/api/unbound/service/reconfigure',)),
                 (lambda: self._ad_block(intent.ad_block, changes), ('/api/unbound/service/dnsbl',)),
+                (lambda: self._app_block(intent.app_block, changes), ('/api/unbound/service/dnsbl',)),
                 (lambda: self._static_routes(intent.static_routes, changes), ('/api/routes/routes/reconfigure',)),
                 (lambda: self._mdns(intent.mdns, ifaces, changes), ('/api/mdnsrepeater/service/reconfigure',)),
                 (lambda: self._ddns(intent.ddns, changes), ('/api/dyndns/service/reconfigure',)),
@@ -754,7 +816,7 @@ class Reconciler:
         description lists the networks, so a change shows there."""
         before = len(changes)
         owned = [row for row in self.api.get('/api/unbound/settings/search_dnsbl').get('rows', [])
-                 if _owned(row.get('description'))]
+                 if (row.get('description') or '').startswith(OWNER_TAG + ' Ad blocking')]
         if subnets:
             description = '%s Ad blocking for %s' % (OWNER_TAG, ', '.join(subnets))
             body = {'blocklist': {'enabled': '1', 'type': AD_BLOCKLISTS, 'source_nets': ','.join(subnets),
@@ -768,6 +830,31 @@ class Reconciler:
                 self._post('/api/unbound/settings/set_dnsbl/' + current['uuid'], body)
         for current in owned:
             changes.append('Blocklist %r: remove' % current['description'])
+            self._post('/api/unbound/settings/del_dnsbl/' + current['uuid'])
+        return len(changes) > before
+
+    # Unbound blocklists for app blocking
+
+    def _app_block(self, blocks, changes):
+        """One blocklist per traffic rule, blocking its apps' domains and
+        their subdomains for the rule's networks. The description ends with
+        a hash of the domains and networks, so a changed rule is replaced."""
+        before = len(changes)
+        prefix = OWNER_TAG + ' App blocking'
+        owned = {row.get('description'): row for row in self.api.get('/api/unbound/settings/search_dnsbl').get('rows', [])
+                 if (row.get('description') or '').startswith(prefix)}
+        for block in blocks:
+            digest = hashlib.sha256(json.dumps([block.domains, block.subnets]).encode()).hexdigest()[:8]
+            label = '%s for %s' % (', '.join(block.names), ', '.join(block.subnets) or 'all networks')
+            description = '%s: %s (%s)' % (prefix, label[:180], digest)
+            if owned.pop(description, None) is not None:
+                continue
+            changes.append('App blocking: %s: add' % label)
+            self._post('/api/unbound/settings/add_dnsbl', {'blocklist': {
+                'enabled': '1', 'wildcards': ','.join(block.domains),
+                'source_nets': ','.join(block.subnets), 'description': description}})
+        for description, current in sorted(owned.items()):
+            changes.append('Blocklist %r: remove' % description)
             self._post('/api/unbound/settings/del_dnsbl/' + current['uuid'])
         return len(changes) > before
 

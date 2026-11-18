@@ -6,7 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY collectors/ collectors/
-COPY *.py ./
+COPY *.py app_domains.json ./
 
 ENV UNIFI_GW_CONFIG=/app/conf/unifi-gateway.conf
 ENV UNIFI_GW_LOG_LEVEL=INFO

@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from reconcile import (OWNER_TAG, DdnsAccount, DhcpScope, Intent, Network, PortForward, Reconciler,
+from reconcile import (OWNER_TAG, AppBlock, DdnsAccount, DhcpScope, Intent, Network, PortForward, Reconciler,
                        StaticRoute, intent_from_system_cfg)
 
 SUBNET_UUID = 'sub-1'
@@ -513,6 +513,59 @@ def test_ad_blocking_is_one_blocklist():
     assert Reconciler(api, 'apply').run(Intent(ad_block=['10.0.40.0/24', '10.0.99.0/24'])) == []
     Reconciler(api, 'apply').run(Intent())
     assert api.paths() == ['/api/unbound/settings/del_dnsbl/b1', '/api/unbound/service/dnsbl']
+
+
+# A UniFi traffic rule blocking YouTube for the LAN, as the controller sends it
+YOUTUBE_RULE_CFG = {'udapi': {
+    'firewall/filter': [{'config': {'name': 'LAN_IN'}, 'rules': [
+        {'description': '[LAN_IN]allow DNS UTM filter', 'destination': {'address': '203.0.113.2/32'},
+         'id': 10001, 'target': 'RETURN'},
+        {'applicationId': 112, 'categoryId': 4, 'id': 10002, 'ipVersion': 'v4only',
+         'source': {'sets': ['trafficrule_net4_1']}, 'target': 'DROP',
+         'triggerTag': {'id': '6afd0e8dc74c6d4939cef3dd', 'type': 'TRAFFIC_RULE'}},
+        {'applicationId': 112, 'categoryId': 4, 'id': 10003, 'ipVersion': 'v6only',
+         'source': {'sets': ['trafficrule_net6_1']}, 'target': 'DROP',
+         'triggerTag': {'id': '6afd0e8dc74c6d4939cef3dd', 'type': 'TRAFFIC_RULE'}},
+    ]}],
+    'firewall/sets': [
+        {'entries': ['10.0.0.0/24'], 'identification': {'name': 'trafficrule_net4_1', 'type': 'address'}},
+        {'identification': {'name': 'trafficrule_net6_1', 'type': 'address'}},
+    ],
+}}
+
+
+def test_app_blocking_rule_becomes_its_domains():
+    [block] = intent_from_system_cfg(YOUTUBE_RULE_CFG).app_block
+    assert block.names == ['YouTube'] and block.subnets == ['10.0.0.0/24']
+    assert {'youtube.com', 'googlevideo.com', 'youtu.be', 'ytimg.com'} <= set(block.domains)
+
+
+def test_app_blocking_a_category_blocks_its_apps():
+    cfg = copy.deepcopy(YOUTUBE_RULE_CFG)
+    for rule in cfg['udapi']['firewall/filter'][0]['rules'][1:]:
+        del rule['applicationId']
+        del rule['source']
+    [block] = intent_from_system_cfg(cfg).app_block
+    assert {'YouTube', 'NetFlix'} <= set(block.names) and block.subnets == []
+
+
+def test_app_blocking_is_a_blocklist_per_rule_kept_apart_from_ad_blocking():
+    api = FakeOPNsense()
+    api.dnsbl = [{'uuid': 'b0', 'description': OWNER_TAG + ' Ad blocking for 10.0.0.0/24', 'enabled': '1'}]
+    block = AppBlock(names=['YouTube'], domains=['youtu.be', 'youtube.com'], subnets=['10.0.0.0/24'])
+    Reconciler(api, 'apply').run(Intent(ad_block=['10.0.0.0/24'], app_block=[block]))
+    [(path, body), reload] = api.posts
+    assert path == '/api/unbound/settings/add_dnsbl' and reload == ('/api/unbound/service/dnsbl', {})
+    assert body['blocklist']['wildcards'] == 'youtu.be,youtube.com'
+    assert body['blocklist']['source_nets'] == '10.0.0.0/24'
+    assert body['blocklist']['description'].startswith(OWNER_TAG + ' App blocking: YouTube for 10.0.0.0/24 (')
+    api.dnsbl.append({'uuid': 'b1', 'enabled': '1', 'description': body['blocklist']['description']})
+    api.posts = []
+    assert Reconciler(api, 'apply').run(Intent(ad_block=['10.0.0.0/24'], app_block=[block])) == []
+    block.domains.append('ytimg.com')
+    Reconciler(api, 'apply').run(Intent(ad_block=['10.0.0.0/24'], app_block=[block]))
+    assert api.paths() == ['/api/unbound/settings/add_dnsbl', '/api/unbound/settings/del_dnsbl/b1',
+                           '/api/unbound/service/dnsbl']
 
 
 def test_static_routes_find_or_add_their_gateway():
