@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Per-client app traffic from ntopng, reported as a UniFi gateway's DPI
 stats (`dpi_stats` in the inform), which fill a client's Traffic Activity
-and Insights > Activity in the controller.
+and the apps in Insights > Activity in the controller.
 
 ntopng (the os-ntopng plugin) names each connection's application with
 nDPI and keeps bytes per host and application. ndpi_apps.json maps nDPI's

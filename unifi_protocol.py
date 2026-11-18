@@ -272,8 +272,12 @@ def _uxg_fields(dc, ports, uptime=0):
         fields['sys_stats'] = dict(dc.data['sys_stats'])
     if dc.data.get('dpi_stats'):
         # per-client app traffic (collectors/ntopng.py): a client's Traffic
-        # Activity and Insights > Activity come only from this
+        # Activity and the apps in Insights > Activity come only from this
         fields['dpi_stats'] = dc.data['dpi_stats']
+    if dc.data.get('connections'):
+        # conntrack events (collectors/traffic.py): Traffic Flows, and the
+        # clients in Insights > Activity, ranked by how many flows they made
+        fields['connections'] = dc.data['connections']
     return fields
 
 

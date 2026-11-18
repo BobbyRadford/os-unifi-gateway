@@ -11,10 +11,15 @@ Each poll adds how much each state's counts grew since the last poll, so a
 state's bytes stay counted after it is gone. Only inbound states are read,
 since a routed connection also has an outbound state on the interface it
 leaves by with the same counts.
+
+Each poll also reports the states that are new or carried traffic as the
+inform's `connections`, which the controller keeps as Traffic Flows (the
+Flows tab, and the clients and destinations Insights ranks by flow count).
 """
 import ipaddress
 
 TRAFFIC_INTERVAL = 10
+PROTOCOLS = {'icmp': 1, 'tcp': 6, 'udp': 17, 'ipv6-icmp': 58}
 
 
 def _public_address(address):
@@ -49,6 +54,15 @@ class StateCounter:
         self.countries = {}
         self._country = country
         self._last = None
+        self._connections = []
+
+    def take_connections(self):
+        """The inform's `connections` since the last call: one conntrack
+        event per state that is new or carried traffic, with the state's
+        counts so far. The controller merges a connection's events into one
+        flow and takes the latest counts."""
+        connections, self._connections = self._connections, []
+        return connections
 
     def update(self, rows):
         """Add the growth of each state in `rows` (Source.states) since the
@@ -65,9 +79,12 @@ class StateCounter:
             except (TypeError, ValueError):
                 continue
             now[row['id']] = (sent, received)
+            before = last.get(row['id'])
+            if before != (sent, received):
+                self._add_connection(row, sent, received)
             if first:
                 continue
-            before = last.get(row['id'], (0, 0))
+            before = before or (0, 0)
             sent, received = max(sent - before[0], 0), max(received - before[1], 0)
             # a connection between two clients counts for both of them
             src, dst = row.get('src_addr'), row.get('dst_addr')
@@ -80,6 +97,31 @@ class StateCounter:
                 elif _client_address(dst) and _public_address(src):
                     self._add_country(dst, src, received, sent)
         self._last = now
+
+    def _add_connection(self, row, sent, received):
+        protocol = PROTOCOLS.get(row.get('proto'))
+        if protocol is None:
+            return
+        src, dst = row.get('src_addr'), row.get('dst_addr')
+        ip = {'saddr': src, 'daddr': dst, 'protocol': protocol}
+        for key, field in (('sport', 'src_port'), ('dport', 'dst_port')):
+            if str(row.get(field) or '').isdigit():
+                ip[key] = int(row[field])
+        try:
+            sent_packets, received_packets = (int(n) for n in row.get('pkts') or ())
+        except (TypeError, ValueError):
+            sent_packets = received_packets = 0
+        connection = {'ip': ip, 'stats': {
+            'txBytes': sent, 'rxBytes': received,
+            'txPackets': sent_packets, 'rxPackets': received_packets}}
+        if self._country:
+            # the controller ranks destinations and regions by these
+            region = {end: self._country(address) for end, address in (('src', src), ('dst', dst))
+                      if _public_address(address)}
+            region = {end: iso for end, iso in region.items() if iso}
+            if region:
+                connection['region'] = region
+        self._connections.append(connection)
 
     def _add_country(self, client, remote, tx, rx):
         iso = self._country(remote)

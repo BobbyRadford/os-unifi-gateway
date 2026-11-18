@@ -57,7 +57,8 @@ Earlier versions appeared as a UniFi Gateway Lite, on which the controller won't
 | ISP name and logo | the WAN address's provider, from [Team Cymru](https://www.team-cymru.com/ip-asn-mapping)'s IP-to-ASN DNS service |
 | WAN DNS servers | Unbound's upstream servers, otherwise the WAN link's DNS servers |
 | Clients, per-client traffic | ARP table, DHCP leases (Dnsmasq or Kea), firewall states |
-| A client's Traffic Activity, Insights > Activity (apps and categories) | [ntopng](https://www.ntop.org/products/traffic-analysis/ntop/) (the os-ntopng plugin), if set up |
+| A client's Traffic Activity, the apps in Insights > Activity | [ntopng](https://www.ntop.org/products/traffic-analysis/ntop/) (the os-ntopng plugin), if set up |
+| Traffic Flows, the clients in Insights > Activity | firewall states |
 | Traffic per country | the firewall states, with [DB-IP](https://db-ip.com)'s free country database |
 | Client names | the hostname of the client's Kea reservation, else its DHCP lease name without the router's domain, else DNS or ARP |
 | Hostname, uptime, CPU, memory, load average | system information |
@@ -66,7 +67,9 @@ Earlier versions appeared as a UniFi Gateway Lite, on which the controller won't
 
 Per-client traffic comes from the firewall's state table, which holds the bytes each connection has carried. The daemon reads it every 10 seconds, on the LAN and every VLAN alike, and needs nothing set up. pf keeps a connection's state for at least 30 seconds after its last packet, so short connections are counted too. Counting starts when the daemon does, so connections already open then count from that moment. IPv6 traffic isn't counted, because the client list goes by IPv4 address.
 
-A client's Traffic Activity and **Insights > Activity** need to know which app each connection belongs to, which a UniFi gateway learns from deep packet inspection. Here ntopng does it. Install **os-ntopng** (it brings Redis), enable it under **Services > ntopng** with each LAN and VLAN interface selected, set its admin password at first login, and tell the daemon where it is:
+The same reads send each new or active connection to the controller, which keeps them as Traffic Flows. The Flows tab lists them, and Insights > Activity ranks clients by how many flows they made. Flows carry addresses, ports, byte counts and countries, but no hostnames or policy matches.
+
+A client's Traffic Activity and the apps in **Insights > Activity** need to know which app each connection belongs to, which a UniFi gateway learns from deep packet inspection. Here ntopng does it. Install **os-ntopng** (it brings Redis), enable it under **Services > ntopng** with each LAN and VLAN interface selected, set its admin password at first login, and tell the daemon where it is:
 
 ```ini
 [ntopng]

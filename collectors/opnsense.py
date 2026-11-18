@@ -250,6 +250,7 @@ class OPNsenseCollector:
             states = self._call('states')
             if states is not None:
                 self._traffic.update(states)
+        self.data['connections'] = self._traffic.take_connections()
         if self._due('host_table', 60):
             self.data['host_table'] = self._build_host_table()
         self._update_traffic()

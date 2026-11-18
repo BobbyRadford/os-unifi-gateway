@@ -68,3 +68,29 @@ def test_countries_of_the_far_end():
         '10.0.0.5': {'US': [10, 100], 'GB': [1, 2]},
         '10.0.0.30': {'US': [70, 7]},
     }
+
+
+def flow_state(id, src, sport, dst, dport, sent, received, proto='tcp'):
+    row = state(id, src, dst, sent, received)
+    row.update(proto=proto, src_port=str(sport), dst_port=str(dport), pkts=[sent // 10, received // 10])
+    return row
+
+
+def test_connections_are_states_that_are_new_or_carried_traffic():
+    counter = StateCounter(country={'8.8.8.8': 'US'}.get)
+    # the first read reports every open connection, counted from when it began
+    counter.update([flow_state('a', '10.0.0.5', 50000, '8.8.8.8', 443, 100, 5000),
+                    flow_state('b', '10.0.0.5', 40000, '10.0.0.1', 53, 60, 120, proto='udp'),
+                    flow_state('c', '10.0.0.5', 1, '10.0.0.1', 1, 10, 10, proto='pfsync')])
+    assert counter.take_connections() == [
+        {'ip': {'saddr': '10.0.0.5', 'daddr': '8.8.8.8', 'protocol': 6, 'sport': 50000, 'dport': 443},
+         'stats': {'txBytes': 100, 'rxBytes': 5000, 'txPackets': 10, 'rxPackets': 500},
+         'region': {'dst': 'US'}},
+        {'ip': {'saddr': '10.0.0.5', 'daddr': '10.0.0.1', 'protocol': 17, 'sport': 40000, 'dport': 53},
+         'stats': {'txBytes': 60, 'rxBytes': 120, 'txPackets': 6, 'rxPackets': 12}},
+    ]
+    assert counter.take_connections() == []
+    # only the download moved
+    counter.update([flow_state('a', '10.0.0.5', 50000, '8.8.8.8', 443, 150, 9000),
+                    flow_state('b', '10.0.0.5', 40000, '10.0.0.1', 53, 60, 120, proto='udp')])
+    assert [c['stats']['rxBytes'] for c in counter.take_connections()] == [9000]
