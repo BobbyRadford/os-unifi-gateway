@@ -716,3 +716,44 @@ class TestLanConfig:
         # no access to the DHCP settings: just the LAN subnet
         dc = make(gateway_config, fake_api)
         assert dc.data['config_network_lan'] == {'cidr': '192.168.48.254/23', 'vlan': 1}
+
+
+class FakeNtopng:
+
+    def __init__(self, hosts):
+        self.hosts = hosts
+        self.calls = []
+
+    def interfaces(self):
+        return {'vtnet1': 2, 'vlan01': 8}
+
+    def host_apps(self, ifid, ip):
+        self.calls.append((ifid, ip))
+        return self.hosts.get(ip, {})
+
+
+class TestAppTraffic:
+    """dpi_stats from ntopng, per client on the interface it's on."""
+
+    def test_reads_each_arp_client_on_its_interface(self, gateway_config, fake_api):
+        fake_api.responses['/api/diagnostics/interface/search_arp']['rows'].append(
+            {'mac': '00:00:5e:00:53:40', 'ip': '10.0.40.5', 'intf': 'vlan01', 'expired': False,
+             'hostname': '', 'intf_description': 'IoT'})
+        add_row(fake_api, device='vlan01', identifier='opt3', description='IoT',
+                macaddr='00:00:5e:00:53:01', status='up', addr4='10.0.40.1/24')
+        with patch('collectors.opnsense.time.time', return_value=1000.0):
+            dc = make(gateway_config, fake_api)
+        ntopng = dc._ntopng = FakeNtopng({'10.0.40.5': {'NetFlix': {'bytes.sent': 10, 'bytes.rcvd': 100}}})
+        dc._update_apps()
+        assert (8, '10.0.40.5') in ntopng.calls
+        assert all(ifid == 2 for ifid, ip in ntopng.calls if ip != '10.0.40.5')
+        ntopng.hosts['10.0.40.5']['NetFlix'] = {'bytes.sent': 15, 'bytes.rcvd': 400}
+        dc.updated['apps'] = 0
+        dc.update()
+        assert dc.data['dpi_stats'] == [{
+            'mac': '00:00:5e:00:53:40', 'initialized': dc._apps.started,
+            'stats': [{'cat': 4, 'app': 132, 'txBytes': 5, 'rxBytes': 300}]}]
+
+    def test_off_without_settings(self, gateway_config, fake_api):
+        dc = make(gateway_config, fake_api)
+        assert dc._ntopng is None and dc._geoip is None and 'dpi_stats' not in dc.data

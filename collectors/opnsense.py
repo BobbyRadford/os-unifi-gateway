@@ -11,6 +11,10 @@ import logging
 import re
 import time
 
+import requests
+
+from .geoip import CountryDB
+from .ntopng import APPS_INTERVAL, INTERFACES_INTERVAL, AppCounter, Ntopng
 from .source import LEASE_SERVERS, SourceError
 from .traffic import TRAFFIC_INTERVAL, StateCounter
 
@@ -183,7 +187,14 @@ class OPNsenseCollector:
         self._failed = set()
         self._prev_io = {}
         self._lease_server = None
-        self._traffic = StateCounter()
+        geoip = config.get('geoip', 'file', fallback='').strip()
+        self._geoip = CountryDB(geoip) if geoip else None
+        self._traffic = StateCounter(country=self._geoip.country if self._geoip else None)
+        self._apps = AppCounter()
+        self._ntopng = self._create_ntopng(config)
+        self._ntopng_ifids = {}
+        self._ntopng_failed = False
+        self._client_devices = {}
         self._wan_dns = []
         self._upstream_dns = []
         self._links = {}
@@ -242,6 +253,11 @@ class OPNsenseCollector:
         if self._due('host_table', 60):
             self.data['host_table'] = self._build_host_table()
         self._update_traffic()
+        if (self._ntopng or self._geoip) and self._due('apps', APPS_INTERVAL):
+            if self._ntopng:
+                self._update_apps()
+            clients = {h['ip']: h['mac'] for h in self.data.get('host_table', [])}
+            self.data['dpi_stats'] = self._apps.dpi_stats(clients, self._traffic.countries)
 
         self.updated['general'] = time.time()
 
@@ -690,6 +706,33 @@ class OPNsenseCollector:
         for entry in self.data.get('host_table', []):
             entry.update(self._traffic.totals.get(entry['ip'], {}))
 
+    @staticmethod
+    def _create_ntopng(config):
+        try:
+            return Ntopng.from_config(config)
+        except OSError as e:
+            logger.warning('Not reading app traffic from ntopng: %s', e)
+            return None
+
+    def _update_apps(self):
+        """Per-client app traffic from ntopng, for the inform's dpi_stats.
+        Each client is read on the ntopng interface it is on."""
+        try:
+            if not self._ntopng_ifids or self._due('ntopng_interfaces', INTERFACES_INTERVAL):
+                self._ntopng_ifids = self._ntopng.interfaces()
+            hosts = {}
+            for ip, device in self._client_devices.items():
+                ifid = self._ntopng_ifids.get(device)
+                if ifid is not None:
+                    hosts[ip] = self._ntopng.host_apps(ifid, ip)
+        except (requests.RequestException, ValueError) as e:
+            if not self._ntopng_failed:
+                logger.warning('Could not read app traffic from ntopng: %s', e)
+            self._ntopng_failed = True
+            return
+        self._ntopng_failed = False
+        self._apps.update(hosts)
+
     def _build_host_table(self):
         """LAN clients from the ARP table, merged with DHCP leases."""
         rows = self._call('arp')
@@ -702,6 +745,7 @@ class OPNsenseCollector:
 
         arp_names = {}
         lease_names = {}
+        devices = {}
 
         def add(mac, ip, client_uptime):
             entry = {
@@ -719,6 +763,7 @@ class OPNsenseCollector:
             mac = row['mac'].lower()
             add(mac, row.get('ip', ''), uptime)
             arp_names[mac] = row.get('hostname')
+            devices[row.get('ip', '')] = row['intf']
 
         for lease in self.data.get('dhcp_leases', []):
             if lease['mac'] not in hosts:
@@ -737,6 +782,7 @@ class OPNsenseCollector:
             if name:
                 entry['hostname'] = names[mac] = name
         self._names = names
+        self._client_devices = devices
 
         return list(hosts.values())
 

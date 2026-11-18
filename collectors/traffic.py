@@ -17,6 +17,14 @@ import ipaddress
 TRAFFIC_INTERVAL = 10
 
 
+def _public_address(address):
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return ip.version == 4 and ip.is_global
+
+
 def _client_address(address):
     """True for an IPv4 address that may be a client: the host table lists
     clients by IPv4 address, and remote addresses need no totals."""
@@ -30,10 +38,16 @@ def _client_address(address):
 class StateCounter:
     """Totals per address, {address: {'tx_bytes', 'rx_bytes'}} as a client
     sees them: tx is what it sent. They start at zero when counting starts,
-    so connections already open then add only their bytes from that point."""
+    so connections already open then add only their bytes from that point.
 
-    def __init__(self):
+    With `country`, a function giving the ISO code of a public address,
+    `countries` also holds each client's bytes per country of the far end:
+    {address: {iso: [tx, rx]}}."""
+
+    def __init__(self, country=None):
         self.totals = {}
+        self.countries = {}
+        self._country = country
         self._last = None
 
     def update(self, rows):
@@ -56,9 +70,23 @@ class StateCounter:
             before = last.get(row['id'], (0, 0))
             sent, received = max(sent - before[0], 0), max(received - before[1], 0)
             # a connection between two clients counts for both of them
-            self._add(row.get('src_addr'), sent, received)
-            self._add(row.get('dst_addr'), received, sent)
+            src, dst = row.get('src_addr'), row.get('dst_addr')
+            self._add(src, sent, received)
+            self._add(dst, received, sent)
+            if self._country and (sent or received):
+                # a client reaching out, or reached through a port forward
+                if _client_address(src) and _public_address(dst):
+                    self._add_country(src, dst, sent, received)
+                elif _client_address(dst) and _public_address(src):
+                    self._add_country(dst, src, received, sent)
         self._last = now
+
+    def _add_country(self, client, remote, tx, rx):
+        iso = self._country(remote)
+        if iso:
+            entry = self.countries.setdefault(client, {}).setdefault(iso, [0, 0])
+            entry[0] += tx
+            entry[1] += rx
 
     def _add(self, address, tx, rx):
         if not (tx or rx) or not _client_address(address):

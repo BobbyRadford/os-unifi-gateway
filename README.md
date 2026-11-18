@@ -57,12 +57,26 @@ Earlier versions appeared as a UniFi Gateway Lite, on which the controller won't
 | ISP name and logo | the WAN address's provider, from [Team Cymru](https://www.team-cymru.com/ip-asn-mapping)'s IP-to-ASN DNS service |
 | WAN DNS servers | Unbound's upstream servers, otherwise the WAN link's DNS servers |
 | Clients, per-client traffic | ARP table, DHCP leases (Dnsmasq or Kea), firewall states |
+| A client's Traffic Activity, Insights > Activity (apps and categories) | [ntopng](https://www.ntop.org/products/traffic-analysis/ntop/) (the os-ntopng plugin), if set up |
+| Traffic per country | the firewall states, with [DB-IP](https://db-ip.com)'s free country database |
 | Client names | the hostname of the client's Kea reservation, else its DHCP lease name without the router's domain, else DNS or ARP |
 | Hostname, uptime, CPU, memory, load average | system information |
 | WAN speed test | measured by the daemon against the nearest fast [speedtest.net](https://www.speedtest.net) server |
 | Client ping test | the firewall pings the client |
 
 Per-client traffic comes from the firewall's state table, which holds the bytes each connection has carried. The daemon reads it every 10 seconds, on the LAN and every VLAN alike, and needs nothing set up. pf keeps a connection's state for at least 30 seconds after its last packet, so short connections are counted too. Counting starts when the daemon does, so connections already open then count from that moment. IPv6 traffic isn't counted, because the client list goes by IPv4 address.
+
+A client's Traffic Activity and **Insights > Activity** need to know which app each connection belongs to, which a UniFi gateway learns from deep packet inspection. Here ntopng does it. Install **os-ntopng** (it brings Redis), enable it under **Services > ntopng** with each LAN and VLAN interface selected, set its admin password at first login, and tell the daemon where it is:
+
+```ini
+[ntopng]
+url = http://192.168.1.1:3000
+password_file = /var/lib/opnsense-unifi/ntopng-password.txt
+```
+
+The daemon reads each client's apps from ntopng once a minute and reports them under UniFi's own app IDs. 152 of nDPI's apps have a UniFi counterpart (`collectors/ndpi_apps.json`, made by `dev/make_ndpi_apps.py`), and the rest show as Unknown. ntopng's numbers only split each client's traffic between apps, so they can differ a little from the firewall's totals.
+
+Traffic per country uses the firewall states and DB-IP's free IP to Country Lite database, which the daemon downloads each month into `dbip-country-lite.mmdb` next to the config file (set `file` under `[geoip]` to move it, or leave it empty to turn this off). IP Geolocation by [DB-IP](https://db-ip.com).
 
 The speed test (**ISP Speed Test** on the dashboard, or the controller's schedule) needs nothing extra installed, and shows its progress live. It runs where the daemon runs: on the plugin it measures the firewall's WAN link, but in Docker it measures the Docker host's connection, not the router's. It picks the lowest-latency of the nearest speedtest.net servers, then measures each direction for at least 10 seconds over 8 connections, so results should match speedtest.net. The last result is kept in `speedtest.json` next to the config file.
 

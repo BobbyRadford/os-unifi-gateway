@@ -169,6 +169,8 @@ class TestSendInform:
 def _collector(gw):
     from collectors.api_source import APISource
     from collectors.opnsense import OPNsenseCollector
+    # no country database download from tests
+    gw.config.set('geoip', 'file', '')
     return OPNsenseCollector(gw.config, APISource(FakeAPI()), gw.device.wan_port, gw.device.lan_port)
 
 

@@ -50,3 +50,21 @@ def test_skips_ipv6_and_bad_rows():
                     {'id': 'b', 'direction': 'in', 'src_addr': '10.0.0.5', 'bytes': None},
                     {'direction': 'in', 'src_addr': '10.0.0.5', 'bytes': [1, 2]}])
     assert counter.totals == {}
+
+
+def test_countries_of_the_far_end():
+    countries = {'8.8.8.8': 'US', '81.2.69.142': 'GB'}
+    counter = StateCounter(country=countries.get)
+    counter.update([])
+    counter.update([
+        state('a', '10.0.0.5', '8.8.8.8', 10, 100),
+        state('b', '10.0.0.5', '81.2.69.142', 1, 2),
+        # reached through a port forward
+        state('c', '8.8.8.8', '10.0.0.30', 7, 70),
+        # between two clients: no country
+        state('d', '10.0.0.5', '10.0.40.2', 5, 5),
+    ])
+    assert counter.countries == {
+        '10.0.0.5': {'US': [10, 100], 'GB': [1, 2]},
+        '10.0.0.30': {'US': [70, 7]},
+    }

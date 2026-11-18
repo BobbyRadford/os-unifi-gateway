@@ -270,6 +270,10 @@ def _uxg_fields(dc, ports, uptime=0):
         fields['geo_info'] = {'WAN': dict(dc.data['isp'])}
     if dc.data.get('sys_stats'):
         fields['sys_stats'] = dict(dc.data['sys_stats'])
+    if dc.data.get('dpi_stats'):
+        # per-client app traffic (collectors/ntopng.py): a client's Traffic
+        # Activity and Insights > Activity come only from this
+        fields['dpi_stats'] = dc.data['dpi_stats']
     return fields
 
 

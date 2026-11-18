@@ -77,6 +77,11 @@ DEFAULTS = {
     'apply': {
         'mode': 'off',
     },
+    # the country database for traffic per country (collectors/geoip.py);
+    # an empty file turns it off
+    'geoip': {
+        'file': os.path.join(os.path.dirname(CONFIG_FILE), 'dbip-country-lite.mmdb'),
+    },
 }
 
 # Environment variables that override settings for this process only; they
