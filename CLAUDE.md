@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-An OPNsense plugin (`os-unifi-gateway`) whose Python daemon makes OPNsense appear to a UniFi Network controller as a UniFi gateway, speaking the UniFi "inform" protocol. OPNsense is the only supported router. Docker runs the same daemon off-box against the OPNsense REST API, for testing.
+A Python daemon that makes OPNsense appear to a UniFi Network controller as a UniFi gateway (a UXG-Pro), speaking the UniFi "inform" protocol, and with `[apply] mode` makes OPNsense match the configuration the controller sends. OPNsense is the only supported router. The daemon runs off the router against the OPNsense REST API (a Proxmox container, systemd or Docker), which is the main way this fork runs and the only one that can apply settings. It can also run on the router as the OPNsense plugin `os-unifi-gateway`, reading through configd.
 
-Forked from [amd989/unifi-gateway](https://github.com/amd989/unifi-gateway), itself based on [stephanlascar/unifi-gateway](https://github.com/stephanlascar/unifi-gateway) and [qvr/unifi-gateway](https://github.com/qvr/unifi-gateway).
+This repository (BobbyRadford/os-unifi-gateway, branch `master`) is a fork of [rtm516/os-unifi-gateway](https://github.com/rtm516/os-unifi-gateway), which was forked from [amd989/unifi-gateway](https://github.com/amd989/unifi-gateway), itself based on [stephanlascar/unifi-gateway](https://github.com/stephanlascar/unifi-gateway) and [qvr/unifi-gateway](https://github.com/qvr/unifi-gateway). The README is for people setting it up. Keep its sections in order: how it works, requirements, setting up OPNsense, installing, adopting, what UniFi shows, managing OPNsense from UniFi, configuration reference, development.
 
 ## Running
 
