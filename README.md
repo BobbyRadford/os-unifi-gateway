@@ -88,9 +88,9 @@ Apply mode also needs these. Each one also lets the key change that part of OPNs
 |---|---|
 | Interfaces: VLAN | VLANs for UniFi networks |
 | Interfaces: Assign network ports | interfaces for those VLANs |
-| Firewall: Rules [new] | rules for networks, isolation and region blocking |
+| Firewall: Rules [new] | rules for networks, isolation, firewall rules and region blocking |
 | Firewall: NAT: Destination NAT | port forwards |
-| Firewall: Alias: Edit | region blocking |
+| Firewall: Alias: Edit | firewall rules and region blocking |
 | Services: DHCP: Kea(v4) | DHCP ranges, options and reservations |
 | Services: Unbound | DNS records, ad blocking and app blocking |
 | System: Static Routes | static routes |
@@ -235,6 +235,7 @@ With apply mode on, the daemon makes OPNsense match what you set in UniFi. The c
 | A network's DHCP gateway, DNS servers, NTP servers and domain name | the Kea subnet's options |
 | Fixed IP on a client | a Kea reservation for its MAC |
 | Port forwarding rules | Destination NAT rules, each passing its own traffic |
+| Firewall rules in LAN In and Internet In | filter rules ahead of the network rules, on every LAN interface or on the WAN, with aliases for groups and lists |
 | DNS records (A and AAAA) | Unbound host overrides |
 | Static routes (next hop or blackhole) | static routes, through a gateway with the next hop's address (added if missing) or Null4/Null6 |
 | Ad Blocking (CyberSecure) | an Unbound blocklist (AdGuard) for those networks |
@@ -261,9 +262,10 @@ On a hand-made Kea subnet such as the LAN, the daemon sets only the options UniF
 
 - **Networks.** VLAN-only networks are left alone, because the gateway doesn't route them. As in UniFi, an isolated network can't start connections to the other local networks, but they can still reach it. Switch ports and Wi-Fi networks carry the VLAN as UniFi configures them, and a Proxmox bridge between the router and the switch has to pass tagged frames (a bridge without VLAN awareness does). Clients that no UniFi switch or access point reports show under the default network, whatever their VLAN.
 - **App blocking.** OPNsense can't match traffic by app, so app blocking blocks the DNS lookups of the domains nDPI knows for each app (`app_domains.json`, made by `dev/make_app_domains.py`). Devices that use their own DNS (DNS over HTTPS, a VPN) get past it, and apps without known domains aren't blocked. A rule's schedule, and sources other than networks, aren't applied. A new block takes effect once clients' cached DNS answers expire, usually within minutes.
+- **Firewall rules.** Only the LAN In and Internet In lists are applied. Rules in the other lists (LAN Out, LAN Local, Internet Out, Internet Local and the guest lists) are skipped with a warning. A rule to any destination leaves out traffic to OPNsense itself, as UniFi's LAN In does. Rules matching only established or related connections aren't needed, since OPNsense passes replies through its state table. Rules that match MAC addresses, ICMP types, IPsec, or a negated protocol are skipped with a warning. Port forwards pass their traffic themselves, so Internet In rules don't apply to it.
 - **Region blocking.** It needs the [GeoIP source](#geoip-source-for-region-blocking). UniFi's "allow" mode isn't applied, because it would block local traffic too.
 - **mDNS and Dynamic DNS.** They need their plugins. UniFi's mDNS service filter isn't applied, so every service is repeated. Custom Dynamic DNS services other than Namecheap are skipped.
-- **Not applied at all.** UPnP (the OPNsense UPnP plugin has no API), interface routes, firewall rules other than app blocking, and IPS. UniFi's IPS alerts come from Ubiquiti's cloud, so they can't be fed from OPNsense.
+- **Not applied at all.** UPnP (the OPNsense UPnP plugin has no API), interface routes, and IPS. UniFi's IPS alerts come from Ubiquiti's cloud, so they can't be fed from OPNsense.
 
 ## Configuration reference
 

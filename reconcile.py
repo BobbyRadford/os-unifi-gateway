@@ -20,6 +20,9 @@ until it matches:
   an Unbound blocklist of the apps' domains for the rule's source networks.
   OPNsense can't match traffic by app, so this blocks the DNS lookups.
   app_domains.json lists the domains (see dev/make_app_domains.py).
+- Firewall rules from the UI's LAN In and Internet In lists, as OPNsense
+  rules ahead of the network rules, on every LAN interface or on the WAN.
+  Addresses and ports that don't fit in one rule field become aliases.
 - Static routes, through an existing gateway with the next hop's address or
   one the reconciler adds.
 - Region blocking, as a GeoIP alias and floating block rules. OPNsense needs
@@ -69,6 +72,18 @@ with open(os.path.join(os.path.dirname(__file__), 'app_domains.json')) as _f:
 # Region blocking: the GeoIP alias and the descriptions of its rules
 REGION_ALIAS = 'unifi_region_block'
 REGION_DESCR = OWNER_TAG + ' Region blocking'
+
+# Firewall rules: the UniFi chains that are applied, with the interfaces they
+# go on ('lan' stands for every LAN interface), the actions and the protocols,
+# as OPNsense names them
+FIREWALL_CHAINS = {'LAN_IN': 'lan', 'WAN_IN': 'wan'}
+FIREWALL_ACTIONS = {'RETURN': 'pass', 'ACCEPT': 'pass', 'DROP': 'block', 'REJECT': 'reject'}
+FIREWALL_PROTOCOLS = {'all': 'any', 'tcp': 'TCP', 'udp': 'UDP', 'tcp_udp': 'TCP/UDP',
+                      'icmp': 'ICMP', 'icmpv6': 'IPV6-ICMP'}
+FIREWALL_DESCR = OWNER_TAG + ' Firewall'
+FIREWALL_ALIAS = 'unifi_fw_'
+# Where the firewall rules go in OPNsense's rule order, ahead of the network rules
+FIREWALL_SEQUENCE = 10000
 
 # UniFi Dynamic DNS services, as os-ddclient names them. UniFi sends Namecheap
 # as a custom service (see _ddns_from). Services left out have no clear match.
@@ -143,6 +158,23 @@ class AppBlock:
 
 
 @dataclass
+class FirewallRule:
+    """A UniFi firewall rule, with OPNsense's names for its values. Empty
+    address and port lists match anything."""
+    chain: str                          # LAN_IN or WAN_IN
+    index: int                          # its place in the chain
+    name: str
+    action: str                         # pass, block or reject
+    ip_version: str                     # inet, inet6 or inet46
+    protocol: str = 'any'
+    source: list = field(default_factory=list)          # addresses, networks or ranges
+    source_ports: list = field(default_factory=list)    # "80", "1000-2000"
+    destination: list = field(default_factory=list)
+    destination_ports: list = field(default_factory=list)
+    log: bool = False
+
+
+@dataclass
 class Intent:
     networks: list = field(default_factory=list)
     dhcp: list = field(default_factory=list)
@@ -150,6 +182,7 @@ class Intent:
     dns_records: dict = field(default_factory=dict)    # {(fqdn, 'A'|'AAAA'): address}
     ad_block: list = field(default_factory=list)       # subnets: ["10.0.40.0/24"]
     app_block: list = field(default_factory=list)      # AppBlock per traffic rule
+    firewall_rules: list = field(default_factory=list)
     static_routes: list = field(default_factory=list)
     region_block: dict = field(default_factory=dict)   # {'countries': [...], 'direction': ...}
     mdns: list = None                   # VLANs to repeat mDNS between (0 is the LAN), None when off
@@ -238,6 +271,7 @@ def intent_from_system_cfg(cfg):
                     pass
     intent.ad_block = sorted(ad_block)
     intent.app_block = _app_blocks(udapi)
+    intent.firewall_rules = _firewall_rules(udapi)
 
     # User routes are described STATIC_ROUTE:<id>. The controller adds its own
     # (WAN default gateways, VPNs) to the same list.
@@ -314,6 +348,90 @@ def _app_blocks(udapi):
                                    domains=sorted({d for a in apps for d in a['domains']}),
                                    subnets=sorted(entry['subnets'])))
     return blocks
+
+
+def _firewall_rules(udapi):
+    """The rules from the UI's firewall rule lists. The controller puts them
+    in the chain of their rule set (LAN_IN), among its own rules, with
+    their rule index as their ID and a FIREWALL_RULE trigger tag. Its own
+    rules have IDs from 10000. A rule that can't be matched in OPNsense is
+    skipped with a warning, rather than applied as something wider."""
+    sets = {s['identification']['name']: s for s in udapi.get('firewall/sets', [])}
+    known = {'id', 'description', 'target', 'ipVersion', 'protocol', 'icmpType', 'icmpv6Type',
+             'connectionState', 'source', 'destination', 'log', 'triggerTag', 'enabled'}
+    rules = []
+    for chain in udapi.get('firewall/filter', []):
+        name = (chain.get('config') or {}).get('name')
+        for rule in chain.get('rules', []):
+            tag = (rule.get('triggerTag') or {}).get('type')
+            if not (tag == 'FIREWALL_RULE' or (tag is None and rule.get('id', 10000) < 10000)):
+                continue
+            label = '%s rule %s (%s)' % (name, rule.get('id'), rule.get('description', ''))
+            if name not in FIREWALL_CHAINS:
+                logger.warning('Skipping firewall %s: only LAN In and Internet In rules are applied', label)
+                continue
+            if not rule.get('enabled', True):
+                continue
+            try:
+                rules.append(_firewall_rule(name, rule, sets, known))
+            except ValueError as e:
+                logger.warning('Skipping firewall %s: %s', label, e)
+            except LookupError:
+                logger.info('Firewall %s matches nothing, so it is not applied', label)
+    return sorted((r for r in rules if r), key=lambda r: (r.chain, r.index, r.ip_version))
+
+
+def _firewall_rule(chain, rule, sets, known):
+    """One FirewallRule, or None when OPNsense does it already. Raises
+    ValueError for what can't be matched and LookupError for a rule that
+    matches nothing (an empty group)."""
+    if set(rule) - known:
+        raise ValueError('it uses %s' % ', '.join(sorted(set(rule) - known)))
+    action = FIREWALL_ACTIONS.get(rule.get('target'))
+    protocol = FIREWALL_PROTOCOLS.get(rule.get('protocol') or 'all')
+    if not action or not protocol:
+        raise ValueError('%s %s is not supported' % (rule.get('target'), rule.get('protocol')))
+    if rule.get('icmpType', 'any') != 'any' or rule.get('icmpv6Type', 'any') != 'any':
+        raise ValueError('ICMP types are not supported')
+    # pf keeps state, so replies already pass and invalid packets are dropped:
+    # only a rule for new connections means anything
+    states = set(rule.get('connectionState') or [])
+    if states and 'new' not in states:
+        if action == 'pass':
+            return None
+        raise ValueError('it only matches %s connections' % ', '.join(sorted(states)))
+
+    def endpoint(side):
+        spec = rule.get(side) or {}
+        if set(spec) - {'address', 'port', 'sets'}:
+            raise ValueError('its %s uses %s' % (side, ', '.join(sorted(set(spec) - {'address', 'port', 'sets'}))))
+        addresses = [spec['address']] if spec.get('address') else []
+        ports = [p.strip().replace(':', '-') for p in str(spec.get('port') or '').split(',') if p.strip()]
+        for set_name in spec.get('sets') or []:
+            found = sets.get(set_name)
+            kind = (found or {}).get('identification', {}).get('type')
+            if not found or kind not in ('address', 'port'):
+                raise ValueError('its %s set %s is not supported' % (side, set_name))
+            matches = addresses if kind == 'address' else ports
+            # several matches of one kind in a rule must all match
+            if matches:
+                raise ValueError('its %s has more than one %s match' % (side, kind))
+            entries = [str(e).replace(':', '-') if kind == 'port' else str(e) for e in found.get('entries') or []]
+            if not entries:
+                raise LookupError(set_name)
+            matches.extend(entries)
+        return addresses, ports
+
+    source, source_ports = endpoint('source')
+    destination, destination_ports = endpoint('destination')
+    ip_version = {'v4only': 'inet', 'v6only': 'inet6'}.get(rule.get('ipVersion'), 'inet46')
+    families = {':' in a for a in source + destination}
+    if ip_version == 'inet46' and len(families) == 1:
+        ip_version = 'inet6' if families == {True} else 'inet'
+    return FirewallRule(chain=chain, index=int(rule['id']), name=rule.get('description') or '',
+                        action=action, ip_version=ip_version, protocol=protocol,
+                        source=source, source_ports=source_ports, destination=destination,
+                        destination_ports=destination_ports, log=bool(rule.get('log')))
 
 
 def _bridge_vlans(udapi):
@@ -430,6 +548,8 @@ class Reconciler:
                 (lambda: self._kea(intent.dhcp, intent.networks, ifaces, removals, changes),
                  ('/api/kea/service/reconfigure',)),
                 (lambda: self._rules(intent.networks, ifaces, changes), ('/api/firewall/filter/apply',)),
+                (lambda: self._firewall(intent.firewall_rules, ifaces, changes),
+                 ('/api/firewall/alias/reconfigure', '/api/firewall/filter/apply')),
                 (lambda: self._port_forwards(intent.port_forwards, changes), ('/api/firewall/d_nat/apply',)),
                 (lambda: self._dns_records(intent.dns_records, changes), ('/api/unbound/service/reconfigure',)),
                 (lambda: self._ad_block(intent.ad_block, changes), ('/api/unbound/service/dnsbl',)),
@@ -613,6 +733,90 @@ class Reconciler:
             if key not in wanted:
                 changes.append('Rule %r: remove' % current['description'])
                 self._post('/api/firewall/filter/del_rule/' + current['uuid'])
+        return len(changes) > before
+
+    # Firewall rules from the UI
+
+    @staticmethod
+    def _firewall_plan(rules, ifaces):
+        """The OPNsense rules for UniFi's firewall rules, by description, and
+        the aliases they need, by name. A rule field holds one address or
+        port, so lists and address ranges go in an alias named after its
+        contents. A rule to any destination leaves out the firewall itself,
+        because UniFi's LAN In and Internet In don't cover traffic to the
+        gateway (that is LAN Local and Internet Local)."""
+        lan = ','.join(['lan'] + sorted(i for i in ifaces.values() if i))
+        aliases = {}
+
+        def field(values, kind):
+            if not values:
+                return 'any' if kind == 'network' else ''
+            if len(values) == 1 and (kind == 'port' or '-' not in values[0]):
+                return values[0]
+            content = '\n'.join(sorted(v.replace('-', ':') if kind == 'port' else v for v in values))
+            name = FIREWALL_ALIAS + hashlib.sha256((kind + content).encode()).hexdigest()[:12]
+            aliases[name] = {'enabled': '1', 'name': name, 'type': kind, 'content': content,
+                             'description': '%s rule %ss' % (FIREWALL_DESCR, 'address' if kind == 'network' else kind)}
+            return name
+
+        wanted = {}
+        for position, rule in enumerate(rules):
+            chain = rule.chain.replace('_', 'v6_') if rule.ip_version == 'inet6' else rule.chain
+            description = '%s %s %d: %s' % (FIREWALL_DESCR, chain, rule.index, rule.name)
+            destination = field(rule.destination, 'network')
+            wanted[description] = {
+                'enabled': '1', 'action': rule.action, 'quick': '1', 'direction': 'in',
+                'interface': lan if FIREWALL_CHAINS[rule.chain] == 'lan' else 'wan',
+                'ipprotocol': rule.ip_version, 'protocol': rule.protocol,
+                'source_net': field(rule.source, 'network'), 'source_not': '0',
+                'source_port': field(rule.source_ports, 'port'),
+                'destination_net': '(self)' if destination == 'any' else destination,
+                'destination_not': '1' if destination == 'any' else '0',
+                'destination_port': field(rule.destination_ports, 'port'),
+                'log': '1' if rule.log else '0', 'sequence': str(FIREWALL_SEQUENCE + position),
+                'description': description,
+            }
+        return wanted, aliases
+
+    def _firewall(self, rules, ifaces, changes):
+        before = len(changes)
+        wanted, aliases = self._firewall_plan(rules, ifaces)
+        owned = {row['description']: row for row in self.api.get('/api/firewall/filter/search_rule').get('rows', [])
+                 if (row.get('description') or '').startswith(FIREWALL_DESCR + ' ')}
+        if not wanted and not owned:
+            return False
+        current_aliases = {row['name']: row for row in self.api.get('/api/firewall/alias/search_item').get('rows', [])
+                           if (row.get('name') or '').startswith(FIREWALL_ALIAS)}
+
+        # aliases first, then the rules using them, then old aliases
+        for name, alias in sorted(aliases.items()):
+            if name not in current_aliases:
+                changes.append('Firewall alias %s (%s): add' % (name, alias['content'].replace('\n', ', ')))
+                self._post('/api/firewall/alias/add_item', {'alias': alias})
+
+        def same(current, want):
+            # searches show the protocol in its own case and multiple
+            # interfaces in any order
+            def norm(key, value):
+                value = str(value or '').lower()
+                return ','.join(sorted(value.split(','))) if key == 'interface' else value
+            return all(norm(key, current.get(key)) == norm(key, value) for key, value in want.items())
+
+        for description, want in sorted(wanted.items(), key=lambda item: int(item[1]['sequence'])):
+            current = owned.pop(description, None)
+            if current is None:
+                changes.append('Rule %r: add' % description)
+                self._post('/api/firewall/filter/add_rule', {'rule': want})
+            elif not same(current, want):
+                changes.append('Rule %r: update' % description)
+                self._post('/api/firewall/filter/set_rule/' + current['uuid'], {'rule': want})
+        for description, current in sorted(owned.items()):
+            changes.append('Rule %r: remove' % description)
+            self._post('/api/firewall/filter/del_rule/' + current['uuid'])
+        for name, current in sorted(current_aliases.items()):
+            if name not in aliases:
+                changes.append('Firewall alias %s: remove' % name)
+                self._post('/api/firewall/alias/del_item/' + current['uuid'])
         return len(changes) > before
 
     # Kea DHCPv4
