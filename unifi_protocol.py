@@ -34,8 +34,8 @@ USG2_LIVE_UPDATE = 16
 LIVE_INFORM_INTERVAL = 2
 # usg2_caps bit 1 enables the client Ping Test (see pingtest.py)
 USG2_PING_TEST = 1
-# usg2_caps bit 29 makes the controller read the inform's `triggers`
-USG2_TRIGGER_LOGS = 0x20000000
+# usg_caps bit 29 makes the controller read the inform's `triggers`
+USG_TRIGGER_LOGS = 0x20000000
 
 
 def encode_inform(config, data, encryption='CBC'):
@@ -259,7 +259,7 @@ def _uxg_fields(dc, ports, uptime=0):
         # and other paths switch whole output formats, so add only what's used.
         'udapi_version': {'version': 48, 'versionDetail': {'services/dnsForwarder': 4}},
         'udapi_caps': 0,
-        'usg2_caps': USG2_LIVE_UPDATE | USG2_PING_TEST | USG2_TRIGGER_LOGS,
+        'usg2_caps': USG2_LIVE_UPDATE | USG2_PING_TEST,
         'inform_min_interval': LIVE_INFORM_INTERVAL,
         'gw_caps': {},
         'time_ms': int(time.time() * 1000),
@@ -334,6 +334,7 @@ def _complete_payload(config, dc, device):
         'has_default_route_distance': True,
         'has_eth1': True,
         'has_ssh_disable': True,
+        'usg_caps': USG_TRIGGER_LOGS,
         'hostname': hostname,
         'inform_url': config.get('gateway', 'url'),
         'inform_ip': _inform_ip(config.get('gateway', 'url')),
