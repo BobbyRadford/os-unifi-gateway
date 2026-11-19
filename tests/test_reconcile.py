@@ -738,11 +738,20 @@ FIREWALL_CFG = {'udapi': {
              'triggerTag': {'id': 't1', 'type': 'TRAFFIC_RULE'}},
             {'id': 2147483647, 'ipVersion': 'v4only', 'log': False, 'target': 'RETURN'},
         ]},
-        {'config': {'name': 'LAN_LOCAL'}, 'rules': [firewall_rule(2000, description='Router')]},
+        {'config': {'name': 'LAN_LOCAL'}, 'rules': [
+            firewall_rule(2000, description='Router SSH', protocol='tcp', destination={'port': '22'})]},
+        {'config': {'name': 'LAN_OUT'}, 'rules': [
+            firewall_rule(2000, description='Into IoT', destination={'sets': ['NETv4_br40']})]},
         {'config': {'name': 'WAN_IN'}, 'rules': [
             firewall_rule(2000, description='Allow NAS', target='RETURN', ipVersion='v6only',
                           protocol='tcp', destination={'address': '2001:db8::5', 'port': '443'}),
         ]},
+        {'config': {'name': 'WAN_OUT'}, 'rules': [
+            firewall_rule(2000, description='Kid offline', source={'address': '10.0.0.60'})]},
+        {'config': {'name': 'WAN_LOCAL'}, 'rules': [
+            firewall_rule(2000, description='WireGuard', target='RETURN', protocol='udp',
+                          destination={'port': '51820'})]},
+        {'config': {'name': 'GUEST_IN'}, 'rules': [firewall_rule(2000, description='Guests')]},
     ],
 }}
 
@@ -754,8 +763,12 @@ def test_firewall_rules_from_the_ui():
         # 'both' with only IPv4 addresses is IPv4
         FirewallRule('LAN_IN', 20005, 'Web', 'block', 'inet', 'TCP', source=['10.0.40.10-10.0.40.20'],
                      destination_ports=['80', '8000-8080']),
+        FirewallRule('LAN_LOCAL', 20000, 'Router SSH', 'block', 'inet', 'TCP', destination_ports=['22']),
+        FirewallRule('LAN_OUT', 20000, 'Into IoT', 'block', 'inet', destination=['10.0.40.0/24']),
         FirewallRule('WAN_IN', 20000, 'Allow NAS', 'pass', 'inet6', 'TCP', destination=['2001:db8::5'],
                      destination_ports=['443']),
+        FirewallRule('WAN_LOCAL', 20000, 'WireGuard', 'pass', 'inet', 'UDP', destination_ports=['51820']),
+        FirewallRule('WAN_OUT', 20000, 'Kid offline', 'block', 'inet', source=['10.0.0.60']),
     ]
 
 
@@ -765,12 +778,12 @@ def test_firewall_rules_without_logging_have_no_tag():
         for rule in chain['rules']:
             if (rule.get('triggerTag') or {}).get('type') == 'FIREWALL_RULE':
                 del rule['triggerTag']
-    assert [r.index for r in intent_from_system_cfg(cfg).firewall_rules] == [20000, 20005, 20000]
+    assert [r.index for r in intent_from_system_cfg(cfg).firewall_rules] == [20000, 20005] + [20000] * 5
 
 
 def test_firewall_rules_go_ahead_of_network_rules_with_aliases_for_lists():
     api = FakeOPNsense()
-    rules = intent_from_system_cfg(FIREWALL_CFG).firewall_rules
+    rules = [r for r in intent_from_system_cfg(FIREWALL_CFG).firewall_rules if r.chain in ('LAN_IN', 'WAN_IN')]
     wanted, aliases = Reconciler._firewall_plan(rules, {40: 'opt1', 50: None})
     ssh, web, nas = (wanted[OWNER_TAG + ' Firewall ' + d] for d in
                      ('LAN_IN 20000: Block IoT SSH', 'LAN_IN 20005: Web', 'WANv6_IN 20000: Allow NAS'))
@@ -797,3 +810,23 @@ def test_firewall_rules_go_ahead_of_network_rules_with_aliases_for_lists():
     assert api.paths() == ['/api/firewall/filter/del_rule/f3', '/api/firewall/filter/del_rule/f4',
                            '/api/firewall/alias/del_item/a0', '/api/firewall/alias/del_item/a1',
                            '/api/firewall/alias/reconfigure', '/api/firewall/filter/apply']
+
+
+def test_firewall_rules_cover_what_their_list_covers():
+    rules = intent_from_system_cfg(FIREWALL_CFG).firewall_rules
+    wanted, aliases = Reconciler._firewall_plan(rules, {40: 'opt1', 50: None})
+    local, into, kid, wireguard = (wanted[OWNER_TAG + ' Firewall ' + d] for d in (
+        'LAN_LOCAL 20000: Router SSH', 'LAN_OUT 20000: Into IoT', 'WAN_OUT 20000: Kid offline',
+        'WAN_LOCAL 20000: WireGuard'))
+    # to the firewall itself
+    assert (local['interface'], local['direction'], local['destination_net'], local['destination_not']) == (
+        'lan,opt1', 'in', '(self)', '0')
+    assert (wireguard['interface'], wireguard['destination_net'], wireguard['destination_port']) == (
+        'wan', '(self)', '51820')
+    # leaving for a LAN, from anything but the firewall itself
+    assert (into['direction'], into['source_net'], into['source_not'], into['destination_net']) == (
+        'out', '(self)', '1', '10.0.40.0/24')
+    # from a LAN to anything but the LAN networks, before outbound NAT
+    assert (kid['interface'], kid['direction'], kid['source_net'], kid['destination_not']) == (
+        'lan,opt1', 'in', '10.0.0.60', '1')
+    assert aliases[kid['destination_net']]['content'] == '__lan_network\n__opt1_network'

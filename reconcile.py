@@ -20,8 +20,8 @@ until it matches:
   an Unbound blocklist of the apps' domains for the rule's source networks.
   OPNsense can't match traffic by app, so this blocks the DNS lookups.
   app_domains.json lists the domains (see dev/make_app_domains.py).
-- Firewall rules from the UI's LAN In and Internet In lists, as OPNsense
-  rules ahead of the network rules, on every LAN interface or on the WAN.
+- Firewall rules from the UI's LAN and Internet lists, as OPNsense rules
+  ahead of the network rules, on every LAN interface or on the WAN.
   Addresses and ports that don't fit in one rule field become aliases.
 - Static routes, through an existing gateway with the next hop's address or
   one the reconciler adds.
@@ -73,10 +73,21 @@ with open(os.path.join(os.path.dirname(__file__), 'app_domains.json')) as _f:
 REGION_ALIAS = 'unifi_region_block'
 REGION_DESCR = OWNER_TAG + ' Region blocking'
 
-# Firewall rules: the UniFi chains that are applied, with the interfaces they
-# go on ('lan' stands for every LAN interface), the actions and the protocols,
-# as OPNsense names them
-FIREWALL_CHAINS = {'LAN_IN': 'lan', 'WAN_IN': 'wan'}
+# Firewall rules: where each UniFi chain's rules go in OPNsense, as the
+# interfaces ('lan' stands for every LAN interface), the direction, and what
+# a source and a destination of "any" stand for ('!self' is anything but the
+# firewall, '!local' anything but the LAN networks). Internet Out goes on
+# the LAN interfaces because outbound NAT changes the source before
+# OPNsense's outbound rules see it.
+FIREWALL_CHAINS = {
+    'LAN_IN': ('lan', 'in', 'any', '!self'),
+    'LAN_OUT': ('lan', 'out', '!self', 'any'),
+    'LAN_LOCAL': ('lan', 'in', 'any', 'self'),
+    'WAN_IN': ('wan', 'in', 'any', '!self'),
+    'WAN_OUT': ('lan', 'in', 'any', '!local'),
+    'WAN_LOCAL': ('wan', 'in', 'any', 'self'),
+}
+# the actions and the protocols, as OPNsense names them
 FIREWALL_ACTIONS = {'RETURN': 'pass', 'ACCEPT': 'pass', 'DROP': 'block', 'REJECT': 'reject'}
 FIREWALL_PROTOCOLS = {'all': 'any', 'tcp': 'TCP', 'udp': 'UDP', 'tcp_udp': 'TCP/UDP',
                       'icmp': 'ICMP', 'icmpv6': 'IPV6-ICMP'}
@@ -161,7 +172,7 @@ class AppBlock:
 class FirewallRule:
     """A UniFi firewall rule, with OPNsense's names for its values. Empty
     address and port lists match anything."""
-    chain: str                          # LAN_IN or WAN_IN
+    chain: str                          # one of FIREWALL_CHAINS
     index: int                          # its place in the chain
     name: str
     action: str                         # pass, block or reject
@@ -381,7 +392,7 @@ def _firewall_rules(udapi):
                 continue
             label = '%s rule %s (%s)' % (name, rule.get('id'), rule.get('description', ''))
             if name not in FIREWALL_CHAINS:
-                logger.warning('Skipping firewall %s: only LAN In and Internet In rules are applied', label)
+                logger.warning('Skipping firewall %s: its rule list is not applied', label)
                 continue
             if not rule.get('enabled', True):
                 continue
@@ -755,36 +766,50 @@ class Reconciler:
         """The OPNsense rules for UniFi's firewall rules, by description, and
         the aliases they need, by name. A rule field holds one address or
         port, so lists and address ranges go in an alias named after its
-        contents. A rule to any destination leaves out the firewall itself,
-        because UniFi's LAN In and Internet In don't cover traffic to the
-        gateway (that is LAN Local and Internet Local)."""
-        lan = ','.join(['lan'] + sorted(i for i in ifaces.values() if i))
+        contents. A source or destination of any stands for what the rule's
+        chain covers (see FIREWALL_CHAINS). LAN In leaves out the firewall
+        itself, for example, because traffic to it is LAN Local."""
+        lan = ['lan'] + sorted(i for i in ifaces.values() if i)
         aliases = {}
+
+        def alias(kind, values, what):
+            content = '\n'.join(sorted(values))
+            name = FIREWALL_ALIAS + hashlib.sha256((kind + content).encode()).hexdigest()[:12]
+            aliases[name] = {'enabled': '1', 'name': name, 'type': kind, 'content': content,
+                             'description': '%s rule %s' % (FIREWALL_DESCR, what)}
+            return name
 
         def field(values, kind):
             if not values:
                 return 'any' if kind == 'network' else ''
             if len(values) == 1 and (kind == 'port' or '-' not in values[0]):
                 return values[0]
-            content = '\n'.join(sorted(v.replace('-', ':') if kind == 'port' else v for v in values))
-            name = FIREWALL_ALIAS + hashlib.sha256((kind + content).encode()).hexdigest()[:12]
-            aliases[name] = {'enabled': '1', 'name': name, 'type': kind, 'content': content,
-                             'description': '%s rule %ss' % (FIREWALL_DESCR, 'address' if kind == 'network' else kind)}
-            return name
+            if kind == 'port':
+                return alias(kind, [v.replace('-', ':') for v in values], 'ports')
+            return alias(kind, values, 'addresses')
+
+        def net(values, anything):
+            # the rule's own addresses, or what any stands for, with its negation
+            if values or anything == 'any':
+                return field(values, 'network'), '0'
+            if anything == '!local':
+                return alias('network', ['__%s_network' % i for i in lan], 'local networks'), '1'
+            return '(self)', '1' if anything == '!self' else '0'
 
         wanted = {}
         for position, rule in enumerate(rules):
+            interfaces, direction, any_source, any_destination = FIREWALL_CHAINS[rule.chain]
             chain = rule.chain.replace('_', 'v6_') if rule.ip_version == 'inet6' else rule.chain
             description = '%s %s %d: %s' % (FIREWALL_DESCR, chain, rule.index, rule.name)
-            destination = field(rule.destination, 'network')
+            source, source_not = net(rule.source, any_source)
+            destination, destination_not = net(rule.destination, any_destination)
             wanted[description] = {
-                'enabled': '1', 'action': rule.action, 'quick': '1', 'direction': 'in',
-                'interface': lan if FIREWALL_CHAINS[rule.chain] == 'lan' else 'wan',
+                'enabled': '1', 'action': rule.action, 'quick': '1', 'direction': direction,
+                'interface': ','.join(lan) if interfaces == 'lan' else 'wan',
                 'ipprotocol': rule.ip_version, 'protocol': rule.protocol,
-                'source_net': field(rule.source, 'network'), 'source_not': '0',
+                'source_net': source, 'source_not': source_not,
                 'source_port': field(rule.source_ports, 'port'),
-                'destination_net': '(self)' if destination == 'any' else destination,
-                'destination_not': '1' if destination == 'any' else '0',
+                'destination_net': destination, 'destination_not': destination_not,
                 'destination_port': field(rule.destination_ports, 'port'),
                 'log': '1' if rule.log else '0', 'sequence': str(FIREWALL_SEQUENCE + position),
                 'description': description,
